@@ -17,6 +17,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument(
+        "--order",
+        choices=["naive-first", "kv-first"],
+        default="naive-first",
+        help="Engine execution order. Reverse order to check warmup bias.",
+    )
+    parser.add_argument(
+        "--warmup-new-tokens",
+        type=int,
+        default=0,
+        help="Optional warmup generation length before measuring each engine.",
+    )
     return parser
 
 
@@ -43,6 +55,10 @@ def run_engine(engine_name: str, args: argparse.Namespace, prompt: str) -> dict[
         device=args.device,
         trust_remote_code=args.trust_remote_code,
     )
+    if args.warmup_new_tokens > 0:
+        engine.generate(prompt, max_new_tokens=args.warmup_new_tokens)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     result = engine.generate(prompt, max_new_tokens=args.max_new_tokens)
     output = {"text": result.text, "metrics": result.metrics.to_dict()}
     del engine
@@ -60,14 +76,22 @@ def main() -> None:
         trust_remote_code=args.trust_remote_code,
     )
 
+    order = ["naive", "kv-cache"]
+    if args.order == "kv-first":
+        order = ["kv-cache", "naive"]
+
+    measured_results: dict[str, dict[str, object]] = {}
+    for engine_name in order:
+        result_key = "kv_cache" if engine_name == "kv-cache" else "naive"
+        measured_results[result_key] = run_engine(engine_name, args, prompt)
+
     results = {
         "model": args.model,
         "prompt_token_length": args.prompt_token_length,
         "max_new_tokens": args.max_new_tokens,
-        "results": {
-            "naive": run_engine("naive", args, prompt),
-            "kv_cache": run_engine("kv-cache", args, prompt),
-        },
+        "order": args.order,
+        "warmup_new_tokens": args.warmup_new_tokens,
+        "results": measured_results,
     }
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
