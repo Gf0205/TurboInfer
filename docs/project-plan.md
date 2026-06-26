@@ -51,6 +51,8 @@
 
 当前第一步实现见 [optimizations/continuous-batching.md](optimizations/continuous-batching.md)。该版本先验证固定 batch decode，后续再加入动态请求到达和尾延迟统计。
 
+动态请求到达和请求级 latency 的模拟版见 [optimizations/dynamic-continuous-batching.md](optimizations/dynamic-continuous-batching.md)。这一版先建立 scheduler 指标体系，为后续 Paged KV Cache 铺路。
+
 ### 第 7-8 周：分页 KV Cache
 
 **范围**：

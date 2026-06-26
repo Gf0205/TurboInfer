@@ -4,9 +4,16 @@ import argparse
 import gc
 import json
 import time
+import sys
+from pathlib import Path
 
 import torch
 from transformers import AutoTokenizer
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from turboinfer.batching import StaticBatchKVCacheEngine
 from turboinfer.engine import KVCacheEngine
@@ -133,4 +140,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
