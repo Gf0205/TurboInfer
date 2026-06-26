@@ -58,3 +58,13 @@ Static batching 假设所有请求同时到达，这不符合真实 serving。Dy
 
 这就是下一步 Paged KV Cache 的动机。
 
+## 当前模拟结果
+
+在 32 个请求、每 0.05 秒到达一个请求、每请求 512 prompt tokens / 128 output tokens、最大 batch size 为 8 的模拟中：
+
+| Policy | Total Seconds | Tokens/s | Req/s | Mean Latency | P95 Latency | Mean TTFT | P95 TTFT |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sequential` | 141.2301 | 29.0023 | 0.2266 | 72.0468 | 130.9532 | 67.7288 | 126.6352 |
+| `continuous_batching_sim` | 19.5101 | 209.9428 | 1.6402 | 11.5485 | 18.1421 | 6.9080 | 13.6421 |
+
+这说明 dynamic batching 不只是提高 tokens/s，也会通过减少排队时间显著降低请求级 P95 latency 和 TTFT。
