@@ -66,9 +66,21 @@ python benchmarks/compare_batching.py \
 - batching 可能增加单请求等待时间和尾延迟
 - continuous batching 的价值在于动态维护 active request set，而不是等固定 batch 凑齐
 
+## 当前结果
+
+在 Colab T4、`Qwen/Qwen2.5-0.5B`、每请求 512 prompt tokens / 128 output tokens 下：
+
+| Requests | Optimization | Total Seconds | Tokens/s | Req/s | Peak Memory MB |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 4 | `sequential_kv_cache` | 15.7150 | 32.5804 | 0.2545 | 1119.5044 |
+| 4 | `static_batch_kv_cache` | 4.6891 | 109.1893 | 0.8530 | 1600.7695 |
+| 8 | `sequential_kv_cache` | 32.5126 | 31.4955 | 0.2461 | 1119.5044 |
+| 8 | `static_batch_kv_cache` | 4.3948 | 233.0013 | 1.8203 | 2247.1523 |
+
+结果说明：顺序执行时，即使每个请求都有 KV Cache，GPU 仍然一次只服务一个 decode stream，总吞吐维持在约 `31-33 tokens/s`。静态 batch decode 把多个请求的 decode step 合并执行，4 请求达到约 `109 tokens/s`，8 请求达到约 `233 tokens/s`。
+
 ## 和 vLLM/SGLang 的关系
 
 生产系统不会只做 fixed batch。vLLM/SGLang 会在运行过程中动态接收新请求，把 prefill 和 decode 调度到合适的 batch 中，并配合 paged KV cache 管理内存。
 
 TurboInfer 当前阶段只复现最小机制：batched decode。后续阶段会继续加入请求到达、完成、队列和 P50/P95 latency 统计。
-
