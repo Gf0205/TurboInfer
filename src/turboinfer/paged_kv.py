@@ -9,6 +9,7 @@ class KVRequest:
     request_id: int
     prompt_tokens: int
     output_tokens: int
+    arrival_step: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -46,6 +47,40 @@ class ContiguousKVStats:
     used_token_slots: int
     wasted_token_slots: int
     utilization: float
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DynamicPagedKVStats:
+    block_size: int
+    total_blocks_budget: int
+    completed_requests: int
+    rejected_requests: int
+    peak_live_requests: int
+    peak_used_blocks: int
+    peak_allocated_token_slots: int
+    peak_used_token_slots: int
+    peak_wasted_token_slots: int
+    peak_utilization: float
+    final_free_blocks: int
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DynamicContiguousKVStats:
+    max_sequence_tokens: int
+    total_token_slots_budget: int
+    completed_requests: int
+    rejected_requests: int
+    peak_live_requests: int
+    peak_allocated_token_slots: int
+    peak_used_token_slots: int
+    peak_wasted_token_slots: int
+    peak_utilization: float
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -136,6 +171,29 @@ def make_mixed_length_requests(
                 request_id=request_id,
                 prompt_tokens=prompt_tokens,
                 output_tokens=output_tokens,
+                arrival_step=0,
+            )
+        )
+    return requests
+
+
+def make_dynamic_mixed_length_requests(
+    num_requests: int,
+    arrival_interval_steps: int,
+    short_prompt_tokens: int,
+    long_prompt_tokens: int,
+    short_output_tokens: int,
+    long_output_tokens: int,
+) -> list[KVRequest]:
+    requests = []
+    for request_id in range(num_requests):
+        is_short = request_id % 2 == 0
+        requests.append(
+            KVRequest(
+                request_id=request_id,
+                arrival_step=request_id * arrival_interval_steps,
+                prompt_tokens=short_prompt_tokens if is_short else long_prompt_tokens,
+                output_tokens=short_output_tokens if is_short else long_output_tokens,
             )
         )
     return requests
@@ -169,3 +227,179 @@ def simulate_paged_vs_contiguous(
         },
     }
 
+
+def simulate_dynamic_paged_kv(
+    requests: list[KVRequest],
+    block_size: int,
+    total_blocks_budget: int,
+) -> DynamicPagedKVStats:
+    manager = PagedKVCacheManager(block_size=block_size, total_blocks=total_blocks_budget)
+    pending = sorted(requests, key=lambda request: request.arrival_step)
+    active: dict[int, KVRequest] = {}
+    generated: dict[int, int] = {}
+    completed = 0
+    rejected = 0
+    step = 0
+    peak_used_blocks = 0
+    peak_used_token_slots = 0
+    peak_live_requests = 0
+
+    while pending or active:
+        while pending and pending[0].arrival_step <= step:
+            request = pending.pop(0)
+            try:
+                manager.allocate_request(request.request_id, request.prompt_tokens)
+                active[request.request_id] = request
+                generated[request.request_id] = 0
+            except MemoryError:
+                rejected += 1
+
+        finished_ids: list[int] = []
+        failed_ids: list[int] = []
+        for request_id, request in active.items():
+            if generated[request_id] >= request.output_tokens:
+                continue
+            try:
+                manager.append_tokens(request_id, 1)
+                generated[request_id] += 1
+            except MemoryError:
+                rejected += 1
+                failed_ids.append(request_id)
+                continue
+            if generated[request_id] >= request.output_tokens:
+                finished_ids.append(request_id)
+
+        stats = manager.stats()
+        peak_used_blocks = max(peak_used_blocks, stats.used_blocks)
+        peak_used_token_slots = max(peak_used_token_slots, stats.used_token_slots)
+        peak_live_requests = max(peak_live_requests, len(active))
+
+        for request_id in finished_ids:
+            if request_id in active:
+                manager.free_request(request_id)
+                active.pop(request_id)
+                generated.pop(request_id)
+                completed += 1
+
+        for request_id in failed_ids:
+            if request_id in active:
+                manager.free_request(request_id)
+                active.pop(request_id)
+                generated.pop(request_id)
+
+        step += 1
+
+    peak_allocated_token_slots = peak_used_blocks * block_size
+    peak_wasted_token_slots = peak_allocated_token_slots - peak_used_token_slots
+    peak_utilization = (
+        peak_used_token_slots / peak_allocated_token_slots if peak_allocated_token_slots else 1.0
+    )
+    return DynamicPagedKVStats(
+        block_size=block_size,
+        total_blocks_budget=total_blocks_budget,
+        completed_requests=completed,
+        rejected_requests=rejected,
+        peak_live_requests=peak_live_requests,
+        peak_used_blocks=peak_used_blocks,
+        peak_allocated_token_slots=peak_allocated_token_slots,
+        peak_used_token_slots=peak_used_token_slots,
+        peak_wasted_token_slots=peak_wasted_token_slots,
+        peak_utilization=peak_utilization,
+        final_free_blocks=len(manager.free_blocks),
+    )
+
+
+def simulate_dynamic_contiguous_kv(
+    requests: list[KVRequest],
+    max_sequence_tokens: int,
+    total_token_slots_budget: int,
+) -> DynamicContiguousKVStats:
+    pending = sorted(requests, key=lambda request: request.arrival_step)
+    active: dict[int, KVRequest] = {}
+    generated: dict[int, int] = {}
+    completed = 0
+    rejected = 0
+    step = 0
+    peak_live_requests = 0
+    peak_used_token_slots = 0
+
+    while pending or active:
+        while pending and pending[0].arrival_step <= step:
+            request = pending.pop(0)
+            needed_slots = (len(active) + 1) * max_sequence_tokens
+            if needed_slots <= total_token_slots_budget:
+                active[request.request_id] = request
+                generated[request.request_id] = 0
+            else:
+                rejected += 1
+
+        finished_ids: list[int] = []
+        for request_id, request in active.items():
+            generated[request_id] += 1
+            if generated[request_id] >= request.output_tokens:
+                finished_ids.append(request_id)
+
+        used_token_slots = sum(
+            request.prompt_tokens + generated[request_id]
+            for request_id, request in active.items()
+        )
+        peak_used_token_slots = max(peak_used_token_slots, used_token_slots)
+        peak_live_requests = max(peak_live_requests, len(active))
+
+        for request_id in finished_ids:
+            active.pop(request_id)
+            generated.pop(request_id)
+            completed += 1
+
+        step += 1
+
+    peak_allocated_token_slots = peak_live_requests * max_sequence_tokens
+    peak_wasted_token_slots = peak_allocated_token_slots - peak_used_token_slots
+    peak_utilization = (
+        peak_used_token_slots / peak_allocated_token_slots if peak_allocated_token_slots else 1.0
+    )
+    return DynamicContiguousKVStats(
+        max_sequence_tokens=max_sequence_tokens,
+        total_token_slots_budget=total_token_slots_budget,
+        completed_requests=completed,
+        rejected_requests=rejected,
+        peak_live_requests=peak_live_requests,
+        peak_allocated_token_slots=peak_allocated_token_slots,
+        peak_used_token_slots=peak_used_token_slots,
+        peak_wasted_token_slots=peak_wasted_token_slots,
+        peak_utilization=peak_utilization,
+    )
+
+
+def simulate_dynamic_paged_vs_contiguous(
+    requests: list[KVRequest],
+    block_size: int,
+    total_blocks_budget: int,
+    max_sequence_tokens: int,
+) -> dict[str, object]:
+    total_token_slots_budget = total_blocks_budget * block_size
+    paged = simulate_dynamic_paged_kv(
+        requests=requests,
+        block_size=block_size,
+        total_blocks_budget=total_blocks_budget,
+    )
+    contiguous = simulate_dynamic_contiguous_kv(
+        requests=requests,
+        max_sequence_tokens=max_sequence_tokens,
+        total_token_slots_budget=total_token_slots_budget,
+    )
+    return {
+        "paged": paged.to_dict(),
+        "contiguous": contiguous.to_dict(),
+        "budget": {
+            "total_blocks_budget": total_blocks_budget,
+            "total_token_slots_budget": total_token_slots_budget,
+            "block_size": block_size,
+            "max_sequence_tokens": max_sequence_tokens,
+        },
+        "comparison": {
+            "completed_request_delta": paged.completed_requests - contiguous.completed_requests,
+            "rejected_request_delta": paged.rejected_requests - contiguous.rejected_requests,
+            "peak_live_request_delta": paged.peak_live_requests - contiguous.peak_live_requests,
+        },
+    }
