@@ -30,12 +30,23 @@ Baseline result:
 | --- | ---: | ---: | ---: | ---: |
 | `naive_no_kv_cache` | 0.8860 | 0.0334 | 21.4170 | 1002.2856 MB |
 
+Long-context benchmark results:
+
+| Prompt Tokens | Optimization | TTFT | TPOT | tokens/s | Total Time |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 512 | `naive_no_kv_cache` | 0.0609 | 0.0674 | 14.8444 | 8.6228 |
+| 512 | `hf_kv_cache` | 0.0626 | 0.0341 | 29.1241 | 4.3950 |
+| 2048 | `naive_no_kv_cache` | 0.4466 | 0.5241 | 1.9101 | 67.0110 |
+| 2048 | `hf_kv_cache` | 0.4613 | 0.0335 | 27.1233 | 4.7192 |
+
 ## 预期现象
 
 - TTFT 可能变化不大，因为 prefill 仍需要处理完整 prompt。
 - TPOT 应该下降，因为每个 decode step 不再重复计算完整历史上下文。
 - tokens/s 应该上升。
 - 峰值显存可能上升，因为 KV Cache 会保存每层的 key/value tensors。
+
+实际长上下文结果显示：TTFT 基本持平，TPOT 和 tokens/s 才是 KV Cache 的核心收益指标。尤其在 2048-token prompt 下，TPOT 从约 `524 ms/token` 降到约 `33.5 ms/token`，说明上下文越长，避免重复计算历史 token 的收益越明显。
 
 ## Colab 命令
 
@@ -52,4 +63,3 @@ python -m turboinfer.cli \
 ## 面试解释
 
 KV Cache 的本质不是减少 prefill 的计算，而是减少 decode 阶段的重复计算。没有 KV Cache 时，第 `t` 步生成需要重新处理前面所有 token；启用 KV Cache 后，历史 token 的 key/value 已经保存，当前步主要计算新 token 的投影并与缓存交互。
-
