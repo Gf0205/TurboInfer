@@ -49,6 +49,8 @@
 - P50/P95/P99 延迟指标
 - 吞吐-延迟权衡的笔记
 
+当前第一步实现见 [optimizations/continuous-batching.md](optimizations/continuous-batching.md)。该版本先验证固定 batch decode，后续再加入动态请求到达和尾延迟统计。
+
 ### 第 7-8 周：分页 KV Cache
 
 **范围**：
