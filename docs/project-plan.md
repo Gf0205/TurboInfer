@@ -68,6 +68,8 @@
 - 最大并发请求数对比
 - 解释分页 KV Cache 对服务的意义
 
+当前 block manager simulator 见 [optimizations/paged-kv-cache.md](optimizations/paged-kv-cache.md)。这一版先验证连续 KV allocation 与 block-based paged allocation 的内存利用率差异。
+
 ### 第 9-10 周：Triton 内核
 
 **范围**：
