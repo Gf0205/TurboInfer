@@ -79,6 +79,8 @@ python benchmarks/compare_batching.py \
 
 结果说明：顺序执行时，即使每个请求都有 KV Cache，GPU 仍然一次只服务一个 decode stream，总吞吐维持在约 `31-33 tokens/s`。静态 batch decode 把多个请求的 decode step 合并执行，4 请求达到约 `109 tokens/s`，8 请求达到约 `233 tokens/s`。
 
+AutoDL RTX 3090 复测中，8 请求 static batch decode 将 token throughput 从约 `52.7 tokens/s` 提升到约 `387.4 tokens/s`，提升约 `7.34x`，同时 peak memory 从约 `1.12 GB` 增加到约 `2.28 GB`。
+
 ## 和 vLLM/SGLang 的关系
 
 生产系统不会只做 fixed batch。vLLM/SGLang 会在运行过程中动态接收新请求，把 prefill 和 decode 调度到合适的 batch 中，并配合 paged KV cache 管理内存。
