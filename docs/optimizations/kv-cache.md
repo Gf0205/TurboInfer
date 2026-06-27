@@ -48,6 +48,10 @@ Long-context benchmark results:
 
 实际长上下文结果显示：TTFT 基本持平，TPOT 和 tokens/s 才是 KV Cache 的核心收益指标。尤其在 2048-token prompt 下，TPOT 从约 `524 ms/token` 降到约 `33.5 ms/token`，说明上下文越长，避免重复计算历史 token 的收益越明显。
 
+AutoDL RTX 3090 复测结果也验证了同一方向：2048-token prompt 下，TPOT 从约 `50.2 ms/token` 降到约 `20.2 ms/token`，tokens/s 从约 `19.9` 提升到约 `48.9`。
+
+备注：Transformers 4.46 会提示 tuple-of-tuples `past_key_values` legacy cache 格式将在 v4.47 移除。当前结果不受影响，后续需要升级为新版 `Cache` class 以保持兼容。
+
 ## Colab 命令
 
 ```bash
