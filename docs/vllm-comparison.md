@@ -44,6 +44,35 @@ python benchmarks/bench_vllm_offline.py \
   --max-new-tokens 128
 ```
 
+## Compare With Real HTTP Continuous Batching
+
+TurboInfer's first real continuous batching HTTP result uses a short prompt workload:
+
+- requests: 8
+- prompt tokens per request: about 14
+- output tokens per request: 64
+- HTTP concurrency: 8
+
+Run vLLM with the closest offline batch workload:
+
+```bash
+python benchmarks/bench_vllm_offline.py \
+  --model /root/autodl-tmp/models/Qwen2.5-0.5B \
+  --num-requests 8 \
+  --prompt-token-length 14 \
+  --max-new-tokens 64 \
+  --gpu-memory-utilization 0.75
+```
+
+Existing TurboInfer RTX 3090 result:
+
+| Engine | Requests | Prompt Tokens | Output Tokens | Total Seconds | Tokens/s | Req/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| TurboInfer HTTP `kv-cache` | 8 | 14 | 64 | 18.9793 | 26.9768 | 0.4215 |
+| TurboInfer HTTP `continuous` | 8 | 14 | 64 | 2.2669 | 225.8625 | 3.5291 |
+
+This comparison is not perfectly apples-to-apples because vLLM offline mode does not include HTTP server overhead, while the TurboInfer result does. It is still useful for understanding the production-engine gap.
+
 ## Compare With TurboInfer Static Batch
 
 TurboInfer:
@@ -74,4 +103,3 @@ Do not claim TurboInfer is a vLLM replacement.
 Correct framing:
 
 > TurboInfer is a learning-oriented mini inference engine. I used it to reproduce core ideas such as KV Cache and batched decode. I then compared it with vLLM to understand production-level gaps, including paged KV memory management, scheduling, optimized attention kernels, and API/server engineering.
-
