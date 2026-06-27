@@ -27,7 +27,7 @@ TurboInfer's real paged KV metadata allocator was benchmarked with a mixed-lengt
 | Peak utilization | 99.51% |
 | Allocation failures | 2 |
 
-## Comparison With Full Contiguous Reservation
+## Comparison With Contiguous Reservation
 
 | Metric | Contiguous Full Reservation | Paged Allocator Peak |
 | --- | ---: | ---: |
@@ -38,7 +38,19 @@ TurboInfer's real paged KV metadata allocator was benchmarked with a mixed-lengt
 
 The paged allocator reduces peak allocated token slots by about 2.33x and saves 33638 wasted token slots in this workload.
 
-Important note: the contiguous baseline shown here is a full-reservation baseline over the configured workload, while paged allocation is measured at runtime peak. This is useful for showing memory waste, but a later benchmark should add a dynamic contiguous baseline under the same admission policy.
+The stricter comparison is the dynamic contiguous baseline below. It uses the same arrival/decode/free policy as paged allocation, but every live request reserves `max_sequence_tokens` slots.
+
+| Metric | Dynamic Contiguous | Paged Allocator |
+| --- | ---: | ---: |
+| Completed requests | 21 | 30 |
+| Rejected requests | 11 | 2 |
+| Peak live requests | 14 | 22 |
+| Peak allocated token slots | 32256 | 31584 |
+| Peak used token slots | 15610 | 31430 |
+| Peak wasted token slots | 16646 | 154 |
+| Peak utilization | 48.39% | 99.51% |
+
+Under the same token-slot budget, paged allocation completes 9 more requests and rejects 9 fewer requests than dynamic contiguous reservation. It also saves 16492 wasted token slots at peak.
 
 ## Allocator Benchmark Command
 
@@ -141,9 +153,26 @@ python benchmarks/bench_http_completions.py \
     "wasted_token_slots": 33792,
     "utilization": 0.5416666666666666
   },
+  "dynamic_contiguous_reservation": {
+    "completed_requests": 21,
+    "rejected_requests": 11,
+    "peak_live_requests": 14,
+    "peak_used_token_slots": 16212,
+    "peak_stats": {
+      "live_requests": 14,
+      "allocated_token_slots": 32256,
+      "used_token_slots": 15610,
+      "wasted_token_slots": 16646,
+      "utilization": 0.4839409722222222
+    }
+  },
   "comparison": {
     "peak_allocated_token_slots_reduction_ratio": 2.3343465045592704,
-    "peak_wasted_token_slots_saved": 33638
+    "peak_wasted_token_slots_saved": 33638,
+    "dynamic_completed_request_delta": 9,
+    "dynamic_rejected_request_delta": -9,
+    "dynamic_peak_allocated_token_slots_reduction_ratio": 1.0212765957446808,
+    "dynamic_peak_wasted_token_slots_saved": 16492
   }
 }
 ```

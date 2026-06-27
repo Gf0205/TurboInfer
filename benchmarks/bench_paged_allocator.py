@@ -125,6 +125,78 @@ def contiguous_baseline(
     }
 
 
+def simulate_dynamic_contiguous(
+    requests: list[WorkloadRequest],
+    max_sequence_tokens: int,
+    total_token_slots: int,
+) -> dict[str, object]:
+    pending = sorted(requests, key=lambda request: request.arrival_step)
+    active: dict[int, WorkloadRequest] = {}
+    generated: dict[int, int] = {}
+    completed = 0
+    rejected = 0
+    step = 0
+    peak_live_requests = 0
+    peak_used_token_slots = 0
+    peak_snapshot: dict[str, object] | None = None
+
+    while pending or active:
+        while pending and pending[0].arrival_step <= step:
+            request = pending.pop(0)
+            requested_slots = (len(active) + 1) * max_sequence_tokens
+            if requested_slots > total_token_slots:
+                rejected += 1
+                continue
+            active[request.request_id] = request
+            generated[request.request_id] = 0
+
+        finished: list[int] = []
+        for request_id, request in list(active.items()):
+            generated[request_id] += 1
+            if generated[request_id] >= request.output_tokens:
+                finished.append(request_id)
+
+        allocated_token_slots = len(active) * max_sequence_tokens
+        used_token_slots = sum(
+            request.prompt_tokens + generated[request_id]
+            for request_id, request in active.items()
+        )
+        wasted_token_slots = allocated_token_slots - used_token_slots
+        utilization = used_token_slots / allocated_token_slots if allocated_token_slots else 1.0
+        peak_live_requests = max(peak_live_requests, len(active))
+        peak_used_token_slots = max(peak_used_token_slots, used_token_slots)
+        if peak_snapshot is None or allocated_token_slots > int(peak_snapshot["allocated_token_slots"]):
+            peak_snapshot = {
+                "live_requests": len(active),
+                "allocated_token_slots": allocated_token_slots,
+                "used_token_slots": used_token_slots,
+                "wasted_token_slots": wasted_token_slots,
+                "utilization": utilization,
+            }
+
+        for request_id in finished:
+            active.pop(request_id)
+            generated.pop(request_id)
+            completed += 1
+
+        step += 1
+
+    return {
+        "completed_requests": completed,
+        "rejected_requests": rejected,
+        "peak_live_requests": peak_live_requests,
+        "peak_used_token_slots": peak_used_token_slots,
+        "peak_stats": peak_snapshot
+        or {
+            "live_requests": 0,
+            "allocated_token_slots": 0,
+            "used_token_slots": 0,
+            "wasted_token_slots": 0,
+            "utilization": 1.0,
+        },
+    }
+
+
 def main() -> None:
     args = build_parser().parse_args()
     requests = make_requests(args)
@@ -137,7 +209,13 @@ def main() -> None:
         requests=requests,
         max_sequence_tokens=args.max_sequence_tokens,
     )
+    dynamic_contiguous = simulate_dynamic_contiguous(
+        requests=requests,
+        max_sequence_tokens=args.max_sequence_tokens,
+        total_token_slots=args.total_blocks * args.block_size,
+    )
     peak_stats = paged["peak_stats"]
+    dynamic_peak = dynamic_contiguous["peak_stats"]
     output = {
         "workload": {
             "num_requests": args.num_requests,
@@ -152,6 +230,7 @@ def main() -> None:
         },
         "paged_allocator": paged,
         "contiguous_full_reservation": contiguous,
+        "dynamic_contiguous_reservation": dynamic_contiguous,
         "comparison": {
             "peak_allocated_token_slots_reduction_ratio": (
                 contiguous["allocated_token_slots"] / peak_stats["allocated_token_slots"]
@@ -159,6 +238,17 @@ def main() -> None:
                 else 0.0
             ),
             "peak_wasted_token_slots_saved": contiguous["wasted_token_slots"]
+            - peak_stats["wasted_token_slots"],
+            "dynamic_completed_request_delta": paged["completed_requests"]
+            - dynamic_contiguous["completed_requests"],
+            "dynamic_rejected_request_delta": paged["rejected_requests"]
+            - dynamic_contiguous["rejected_requests"],
+            "dynamic_peak_allocated_token_slots_reduction_ratio": (
+                dynamic_peak["allocated_token_slots"] / peak_stats["allocated_token_slots"]
+                if peak_stats["allocated_token_slots"]
+                else 0.0
+            ),
+            "dynamic_peak_wasted_token_slots_saved": dynamic_peak["wasted_token_slots"]
             - peak_stats["wasted_token_slots"],
         },
         "requests": [asdict(request) for request in requests],

@@ -15,6 +15,11 @@ The allocator manages:
 
 It does not yet replace Hugging Face's `past_key_values` tensors. Instead, it runs alongside the continuous batching server as real allocator metadata. This is intentional: the next step is to connect this metadata to a paged decode attention kernel.
 
+The allocator benchmark includes two baselines:
+
+- `contiguous_full_reservation`: a coarse full-workload reservation baseline;
+- `dynamic_contiguous_reservation`: the same arrival/decode/free policy as the paged allocator, but each live request reserves `max_sequence_tokens` slots.
+
 ## Files
 
 - `src/turboinfer/paged_allocator.py`
@@ -97,4 +102,3 @@ This allocator is not yet PagedAttention. It is the metadata layer that PagedAtt
 Correct explanation:
 
 > I first simulated paged KV cache to understand memory waste. Then I implemented a real block allocator with request block tables and context lengths. It is integrated with the continuous batching server as metadata. The next step is to replace HF legacy `past_key_values` padding with a paged decode attention kernel that consumes these block tables.
-
