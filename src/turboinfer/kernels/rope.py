@@ -29,6 +29,7 @@ if triton is not None:
         stride_ad: tl.constexpr,
         n_heads: tl.constexpr,
         head_dim: tl.constexpr,
+        half_dim: tl.constexpr,
         block_heads: tl.constexpr,
     ):
         seq_id = tl.program_id(0)
@@ -36,7 +37,6 @@ if triton is not None:
 
         head_offsets = head_group * block_heads + tl.arange(0, block_heads)
         head_mask = head_offsets < n_heads
-        half_dim = head_dim // 2
         dim_offsets = tl.arange(0, half_dim)
 
         angle_ptrs = angles_ptr + seq_id * stride_as + dim_offsets * stride_ad
@@ -163,6 +163,7 @@ def triton_rope(x: torch.Tensor, angles: torch.Tensor, block_heads: int = 4) -> 
         angles.stride(1),
         n_heads,
         head_dim,
+        head_dim // 2,
         block_heads,
         num_warps=4,
     )
