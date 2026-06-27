@@ -94,6 +94,13 @@ Goal:
 - Connect paged KV cache layout with decode attention.
 - This should come after the project already has KV cache and block-based cache management concepts.
 
+Integration should advance in layers:
+
+1. isolated paged decode attention kernel benchmark;
+2. `PagedKVBuffer` benchmark with real physical K/V tensor storage;
+3. controlled single-layer attention benchmark that projects hidden states into Q/K/V before using paged decode attention;
+4. model-specific attention integration with RoPE and GQA details.
+
 ### Stage 5: W4A16 Quantized GEMM
 
 Candidate:
@@ -113,4 +120,3 @@ Before pushing to GitHub, decide how to handle `triton-kernel-zoo/`:
 3. Keep only selected kernels copied into a future `kernels/` or `experiments/kernels/` directory.
 
 For this project, option 3 is the cleanest: copy only the kernels that are actually used by TurboInfer, and keep the full zoo as personal reference material.
-
