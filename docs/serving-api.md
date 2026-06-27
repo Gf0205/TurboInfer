@@ -37,8 +37,11 @@ python scripts/start_server_background.py \
   --model Qwen/Qwen2.5-0.5B \
   --device cuda \
   --host 127.0.0.1 \
-  --port 8000
+  --port 8000 \
+  --preload
 ```
+
+`--preload` sends a 1-token warmup request before the startup cell exits. Without it, the first benchmark request will trigger model loading and may look like it is hanging.
 
 Check logs:
 

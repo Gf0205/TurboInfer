@@ -16,6 +16,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
+    parser.add_argument("--preload", action="store_true", help="Send a tiny request to load the model.")
+    parser.add_argument("--preload-timeout-seconds", type=float, default=300.0)
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--log-file", default="reports/server.log")
     parser.add_argument("--pid-file", default="reports/server.pid")
@@ -34,6 +36,20 @@ def wait_for_health(url: str, timeout_seconds: float) -> None:
             last_error = exc
         time.sleep(1.0)
     raise TimeoutError(f"server did not become healthy at {url}; last_error={last_error}")
+
+
+def preload_model(base_url: str, model: str, timeout_seconds: float) -> None:
+    url = f"{base_url}/v1/completions"
+    payload = {
+        "model": model,
+        "prompt": "warmup",
+        "max_tokens": 1,
+        "engine": "kv-cache",
+        "temperature": 0.0,
+    }
+    with httpx.Client(timeout=timeout_seconds) as client:
+        response = client.post(url, json=payload)
+        response.raise_for_status()
 
 
 def main() -> None:
@@ -71,6 +87,13 @@ def main() -> None:
     health_url = f"http://{args.host}:{args.port}/health"
     try:
         wait_for_health(health_url, args.timeout_seconds)
+        if args.preload:
+            print("Preloading model with a 1-token warmup request...")
+            preload_model(
+                base_url=f"http://{args.host}:{args.port}",
+                model=args.model,
+                timeout_seconds=args.preload_timeout_seconds,
+            )
     except Exception:
         process.terminate()
         raise
@@ -83,4 +106,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

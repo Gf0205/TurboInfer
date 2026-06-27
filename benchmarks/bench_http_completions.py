@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-requests", type=int, default=8)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--quiet", action="store_true")
     return parser
 
 
@@ -75,8 +76,12 @@ def main() -> None:
                 )
                 for idx in range(args.num_requests)
             ]
+            completed = 0
             for future in as_completed(futures):
                 results.append(future.result())
+                completed += 1
+                if not args.quiet:
+                    print(f"completed {completed}/{args.num_requests}", flush=True)
 
     total_seconds = time.perf_counter() - started
     latencies = [float(result["elapsed_seconds"]) for result in results]
@@ -105,4 +110,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
