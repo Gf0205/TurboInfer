@@ -63,8 +63,8 @@ if triton is not None:
         q_ptrs = q_ptr + batch_id * stride_qb + head_id * stride_qh + dim_offsets * stride_qd
         q = tl.load(q_ptrs).to(tl.float32)
 
-        m_i = tl.full((), -float("inf"), tl.float32)
-        l_i = tl.full((), 0.0, tl.float32)
+        m_i = -float("inf")
+        l_i = 0.0
         acc = tl.zeros([HEAD_DIM], dtype=tl.float32)
         scale = 1.0 / tl.sqrt(float(HEAD_DIM))
 
