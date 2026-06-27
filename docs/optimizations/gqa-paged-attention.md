@@ -59,5 +59,23 @@ matches real model attention shapes. Qwen2.5 and Qwen3 use different head
 layouts, so passing both profiles demonstrates that TurboInfer's paged attention
 path is parameterized rather than hard-coded to one model.
 
+## AutoDL RTX 3090 Result
+
+Both profiles completed successfully on AutoDL RTX 3090.
+
+Summary:
+
+- Qwen2.5-0.5B shape: Triton GQA attention latency ranged from about `0.055 ms`
+  to `0.497 ms`; attention-only speedup versus the PyTorch GQA reference ranged
+  from `11.11x` to `313.31x`.
+- Qwen3-0.6B shape: Triton GQA attention latency ranged from about `0.053 ms`
+  to `0.462 ms`; attention-only speedup versus the PyTorch GQA reference ranged
+  from `11.83x` to `362.04x`.
+- Qwen3 reached the highest simple bandwidth estimate: `145.28 GB/s` at
+  `batch=8, context_len=2048`.
+
+Full report:
+[../../reports/gqa-paged-attention-profiles-autodl-3090.md](../../reports/gqa-paged-attention-profiles-autodl-3090.md).
+
 The next step is to add RoPE placement to the same controlled path before
 attempting a full Hugging Face model attention patch.
