@@ -36,7 +36,7 @@ if triton is not None:
         row = tl.load(input_ptr + row_idx * stride_row + offsets, mask=mask, other=0.0).to(tl.float32)
         weight_values = tl.load(weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
         variance = tl.sum(row * row, axis=0) / n_cols
-        inv_rms = tl.rsqrt(variance + eps_value)
+        inv_rms = 1.0 / tl.sqrt(variance + eps_value)
         output = row * inv_rms * weight_values
 
         tl.store(output_ptr + row_idx * stride_row + offsets, output, mask=mask)
