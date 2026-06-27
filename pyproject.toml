@@ -9,7 +9,9 @@ description = "A small, measurable LLM inference engine for AI infrastructure le
 requires-python = ">=3.10"
 dependencies = [
   "torch",
-  "transformers",
+  "transformers>=4.46,<5",
+  "tokenizers>=0.20,<0.21",
+  "huggingface_hub>=0.23,<1.0",
   "accelerate",
   "sentencepiece",
   "protobuf",
