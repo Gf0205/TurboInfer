@@ -150,4 +150,80 @@ python benchmarks/bench_http_completions.py \
 
 ## Next Verification
 
-Run the continuous HTTP benchmark again and record the `paged_kv_allocator` object returned in each response's metrics. That verifies the allocator metadata is also integrated into the real serving path.
+Completed. The continuous HTTP benchmark now returns `paged_kv_allocator` metrics inside each response.
+
+## Continuous Server Integration Result
+
+Workload:
+
+- Engine: `continuous`
+- Requests: 8
+- HTTP concurrency: 8
+- Output tokens per request: 64
+- KV block size: 16
+- KV total blocks: 4096
+
+| Metric | Value |
+| --- | ---: |
+| Total seconds | 2.1830 |
+| Request throughput | 3.6647 req/s |
+| Completion token throughput | 234.5400 tokens/s |
+| Mean latency | 2.1259 s |
+| P50 latency | 2.1325 s |
+| P95 latency | 2.1366 s |
+| Total completion tokens | 512 |
+| Peak memory | 1908.48 MB |
+
+Allocator integration metrics observed in response metadata:
+
+| Allocator Metric | Value |
+| --- | ---: |
+| Block size | 16 |
+| Total blocks | 4096 |
+| Peak used blocks | 40 |
+| Peak live requests | 8 |
+| Peak allocated token slots | 640 |
+| Final used blocks | 0 |
+| Final free blocks | 4096 |
+| Total allocated requests | 8 |
+| Total freed requests | 8 |
+| Allocation failures | 0 |
+| Per-request utilization near completion | 97.5% |
+
+This verifies that the paged KV metadata allocator is integrated into the real continuous batching serving path. Blocks are allocated during prefill, appended during decode, and released when each request finishes.
+
+Important limitation remains: the allocator currently tracks real metadata, while Hugging Face `past_key_values` still store the actual K/V tensors. The next system step is to connect these block tables to a paged decode attention kernel.
+
+## Raw Continuous HTTP Summary
+
+```json
+{
+  "engine": "continuous",
+  "num_requests": 8,
+  "concurrency": 8,
+  "max_tokens": 64,
+  "total_seconds": 2.1829962208867073,
+  "request_throughput_per_second": 3.664687974929473,
+  "completion_token_throughput_per_second": 234.54003039548627,
+  "mean_latency_seconds": 2.1258502453565598,
+  "p50_latency_seconds": 2.132468707859516,
+  "p95_latency_seconds": 2.1365623772144318,
+  "total_completion_tokens": 512,
+  "final_paged_kv_allocator": {
+    "block_size": 16,
+    "total_blocks": 4096,
+    "used_blocks": 0,
+    "free_blocks": 4096,
+    "live_requests": 0,
+    "peak_used_blocks": 40,
+    "peak_live_requests": 8,
+    "allocated_token_slots": 0,
+    "used_token_slots": 0,
+    "wasted_token_slots": 0,
+    "utilization": 1.0,
+    "total_allocated_requests": 8,
+    "total_freed_requests": 8,
+    "allocation_failures": 0
+  }
+}
+```
