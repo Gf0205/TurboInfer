@@ -1,6 +1,6 @@
 # vLLM Comparison: AutoDL RTX 3090
 
-Status: pending user run.
+Status: completed.
 
 ## Goal
 
@@ -48,7 +48,36 @@ python benchmarks/bench_vllm_offline.py \
 
 ### vLLM Result
 
-Paste the JSON output here.
+| Engine | Requests | Prompt Tokens | Output Tokens | Total Seconds | Req/s | Tokens/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| vLLM offline | 8 | 14 | 64 | 0.5539 | 14.4429 | 924.3440 |
+
+### Short Prompt Comparison
+
+| Engine | Total Seconds | Req/s | Tokens/s | Notes |
+| --- | ---: | ---: | ---: | --- |
+| TurboInfer HTTP `kv-cache` | 18.9793 | 0.4215 | 26.9768 | HTTP path, no real decode batching |
+| TurboInfer HTTP `continuous` | 2.2669 | 3.5291 | 225.8625 | HTTP path with continuous batching |
+| vLLM offline | 0.5539 | 14.4429 | 924.3440 | Offline batch, no HTTP overhead |
+
+Relative to TurboInfer HTTP `continuous`, vLLM offline is about 4.09x faster in total time and about 4.09x higher in output token throughput on this short-prompt workload.
+
+Raw vLLM output:
+
+```json
+{
+  "engine": "vllm_offline",
+  "model": "/root/autodl-tmp/models/Qwen2.5-0.5B",
+  "num_requests": 8,
+  "prompt_token_length": 14,
+  "max_new_tokens": 64,
+  "total_output_tokens": 512,
+  "total_seconds": 0.5539063215255737,
+  "request_throughput_per_second": 14.442875426960878,
+  "token_throughput_per_second": 924.3440273254962,
+  "mean_output_tokens": 64.0
+}
+```
 
 ## Longer Prompt Workload
 
@@ -74,7 +103,36 @@ python benchmarks/bench_vllm_offline.py \
 
 ### vLLM Result
 
-Paste the JSON output here.
+| Engine | Requests | Prompt Tokens | Output Tokens | Total Seconds | Req/s | Tokens/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| vLLM offline | 8 | 512 | 128 | 0.8752 | 9.1412 | 1170.0703 |
+
+### Longer Prompt Comparison
+
+| Engine | Total Seconds | Req/s | Tokens/s | Notes |
+| --- | ---: | ---: | ---: | --- |
+| TurboInfer sequential KV | 19.4138 | 0.4121 | 52.7460 | Offline sequential requests |
+| TurboInfer static batch KV | 2.6435 | 3.0262 | 387.3592 | Offline static batch |
+| vLLM offline | 0.8752 | 9.1412 | 1170.0703 | Offline vLLM batch |
+
+Relative to TurboInfer static batch KV, vLLM offline is about 3.02x faster in total time and about 3.02x higher in output token throughput on the 512-token prompt workload.
+
+Raw vLLM output:
+
+```json
+{
+  "engine": "vllm_offline",
+  "model": "/root/autodl-tmp/models/Qwen2.5-0.5B",
+  "num_requests": 8,
+  "prompt_token_length": 512,
+  "max_new_tokens": 128,
+  "total_output_tokens": 1024,
+  "total_seconds": 0.8751610964536667,
+  "request_throughput_per_second": 9.141174159154984,
+  "token_throughput_per_second": 1170.070292371838,
+  "mean_output_tokens": 128.0
+}
+```
 
 ## Interpretation Template
 
@@ -85,3 +143,11 @@ Use this framing after results are available:
 - If TurboInfer is close on a small workload, explain that the workload is simple and the model is small.
 - If vLLM is much faster, explain which missing production features likely account for the gap.
 
+## Final Interpretation
+
+The comparison shows that TurboInfer successfully reproduces the core mechanisms, but vLLM remains substantially faster:
+
+- On the short-prompt workload, vLLM offline reaches 924.34 tokens/s, while TurboInfer HTTP continuous reaches 225.86 tokens/s.
+- On the 512-token prompt workload, vLLM offline reaches 1170.07 tokens/s, while TurboInfer static batch KV reaches 387.36 tokens/s.
+
+This gap is expected. vLLM has production-grade scheduling, PagedAttention, paged KV cache management, optimized attention backends, CUDA graph capture, and mature execution plumbing. TurboInfer's value is that it makes these mechanisms visible and measurable in a smaller codebase.

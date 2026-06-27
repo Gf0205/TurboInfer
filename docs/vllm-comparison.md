@@ -34,6 +34,8 @@ export HF_ENDPOINT=https://hf-mirror.com
 export HF_HUB_DISABLE_XET=1
 ```
 
+The first vLLM run may look stuck while it initializes the engine, loads weights, runs `torch.compile`, captures CUDA graphs, and performs warmup. This is normal. Wait for the JSON output unless the process errors or remains silent for a very long time.
+
 ## Run vLLM Offline Benchmark
 
 ```bash
