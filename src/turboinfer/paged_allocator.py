@@ -36,6 +36,19 @@ class PagedAllocatorStats:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class PagedDecodeMetadata:
+    """Metadata consumed by a paged decode attention kernel."""
+
+    request_ids: list[int]
+    block_table: list[list[int]]
+    context_lens: list[int]
+    max_blocks_per_request: int
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
 class PagedKVAllocator:
     """A real metadata allocator for paged KV cache blocks.
 
@@ -100,6 +113,18 @@ class PagedKVAllocator:
         self._total_freed_requests += 1
         return table
 
+    def token_slot(self, request_id: int, token_index: int) -> tuple[int, int]:
+        """Return `(physical_block_id, offset_in_block)` for a token index."""
+
+        table = self._require_table(request_id)
+        if token_index < 0 or token_index >= table.used_tokens:
+            raise IndexError(
+                f"token_index={token_index} is outside context length {table.used_tokens}"
+            )
+        logical_block = token_index // self.block_size
+        offset = token_index % self.block_size
+        return table.block_ids[logical_block], offset
+
     def block_table(self, request_id: int) -> list[int]:
         return list(self._require_table(request_id).block_ids)
 
@@ -108,6 +133,32 @@ class PagedKVAllocator:
 
     def live_request_ids(self) -> list[int]:
         return sorted(self._tables)
+
+    def decode_metadata(
+        self,
+        request_ids: list[int] | None = None,
+        pad_block_id: int = -1,
+    ) -> PagedDecodeMetadata:
+        """Return padded block tables and context lengths for active requests.
+
+        The returned shape mirrors what paged decode attention kernels expect:
+        `block_table` has shape `[batch_size, max_blocks_per_request]`, and
+        `context_lens` has shape `[batch_size]`.
+        """
+
+        selected_ids = request_ids if request_ids is not None else self.live_request_ids()
+        tables = [self._require_table(request_id) for request_id in selected_ids]
+        max_blocks = max((len(table.block_ids) for table in tables), default=0)
+        padded_tables = [
+            table.block_ids + [pad_block_id] * (max_blocks - len(table.block_ids))
+            for table in tables
+        ]
+        return PagedDecodeMetadata(
+            request_ids=list(selected_ids),
+            block_table=padded_tables,
+            context_lens=[table.used_tokens for table in tables],
+            max_blocks_per_request=max_blocks,
+        )
 
     def stats(self) -> PagedAllocatorStats:
         used_blocks = sum(len(table.block_ids) for table in self._tables.values())
