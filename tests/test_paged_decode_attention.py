@@ -1,6 +1,9 @@
 import pytest
 
-torch = pytest.importorskip("torch")
+try:
+    import torch
+except Exception as exc:  # pragma: no cover - depends on local torch installation.
+    pytest.skip(f"torch is unavailable: {exc}", allow_module_level=True)
 
 from turboinfer.kernels.paged_decode_attention import (
     metadata_to_tensors,

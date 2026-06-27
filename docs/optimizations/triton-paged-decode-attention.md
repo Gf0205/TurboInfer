@@ -45,3 +45,37 @@ The key checks are:
 This still does not mean TurboInfer's full model serving path is accelerated.
 The next step is to connect the kernel call site to continuous batching's active
 decode batch and real KV cache layout.
+
+## AutoDL RTX 3090 Result
+
+The first AutoDL RTX 3090 run completed successfully with:
+
+- GPU: NVIDIA GeForce RTX 3090;
+- PyTorch: 2.1.2+cu121;
+- CUDA runtime used by PyTorch: 12.1;
+- dtype: float16;
+- batch sizes: 1, 4, 8;
+- context lengths: 128, 512, 2048.
+
+Summary:
+
+- max absolute difference range: `4.77e-7` to `1.22e-4`;
+- Triton latency range: `0.0520 ms` to `0.5152 ms`;
+- speedup range versus the simple PyTorch reference: `6.23x` to `55.27x`;
+- best measured Triton bandwidth estimate: `114.01 GB/s`.
+
+Full report: [../../reports/triton-paged-decode-attention-autodl-3090.md](../../reports/triton-paged-decode-attention-autodl-3090.md).
+
+## Current Boundary
+
+The kernel now validates the paged attention metadata contract, but it is still
+an isolated benchmark. The continuous batching engine records paged metadata,
+while the real model decode path still uses Hugging Face `past_key_values`.
+
+The next engineering step is to introduce a real paged K/V tensor buffer:
+
+- allocate K/V storage by physical block;
+- write prefill and decode token K/V into the correct block slots;
+- export the tensors and metadata consumed by `triton_paged_decode_attention`;
+- validate the path with a focused integration benchmark before attempting to
+  modify a full Hugging Face model attention module.

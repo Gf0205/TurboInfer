@@ -11,4 +11,4 @@ dist/
 build/
 *.egg-info/
 triton-kernel-zoo/.git/
-
+*.docx
