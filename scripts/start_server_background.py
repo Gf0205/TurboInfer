@@ -21,6 +21,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--max-batch-size", type=int, default=8)
     parser.add_argument("--batch-wait-seconds", type=float, default=0.002)
+    parser.add_argument("--kv-block-size", type=int, default=16)
+    parser.add_argument("--kv-total-blocks", type=int, default=4096)
     parser.add_argument("--log-file", default="reports/server.log")
     parser.add_argument("--pid-file", default="reports/server.pid")
     return parser
@@ -77,6 +79,10 @@ def main() -> None:
         str(args.max_batch_size),
         "--batch-wait-seconds",
         str(args.batch_wait_seconds),
+        "--kv-block-size",
+        str(args.kv_block_size),
+        "--kv-total-blocks",
+        str(args.kv_total_blocks),
     ]
     if args.trust_remote_code:
         command.append("--trust-remote-code")

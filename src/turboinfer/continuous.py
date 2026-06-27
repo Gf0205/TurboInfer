@@ -12,6 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from turboinfer.engine import GenerationResult, cuda_sync, peak_memory_mb, pick_device, pick_dtype
 from turboinfer.metrics import GenerationMetrics, summarize_token_timings
+from turboinfer.paged_allocator import PagedKVAllocator
 
 
 PastKeyValues = tuple[tuple[torch.Tensor, torch.Tensor], ...]
@@ -49,11 +50,14 @@ class ContinuousBatchingEngine:
         trust_remote_code: bool = False,
         max_batch_size: int = 8,
         batch_wait_seconds: float = 0.002,
+        kv_block_size: int = 16,
+        kv_total_blocks: int = 4096,
     ) -> None:
         self.model_name = model_name
         self.device = pick_device(device)
         self.max_batch_size = max_batch_size
         self.batch_wait_seconds = batch_wait_seconds
+        self.kv_allocator = PagedKVAllocator(block_size=kv_block_size, total_blocks=kv_total_blocks)
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
             trust_remote_code=trust_remote_code,
@@ -94,6 +98,9 @@ class ContinuousBatchingEngine:
     def close(self) -> None:
         self._queue.put(None)
         self._worker.join(timeout=5.0)
+
+    def allocator_stats(self) -> dict[str, object]:
+        return self.kv_allocator.stats().to_dict()
 
     def _drain_new_requests(self, limit: int, wait: bool) -> list[ContinuousRequest]:
         requests: list[ContinuousRequest] = []
@@ -186,9 +193,11 @@ class ContinuousBatchingEngine:
 
         for idx, request in enumerate(requests):
             request.prompt_tokens = int(prompt_lengths[idx])
+            self.kv_allocator.allocate_request(request.request_id, request.prompt_tokens)
             request.attention_mask = attention_mask[idx : idx + 1]
             request.past_key_values = self._slice_past(outputs.past_key_values, idx)
             request.next_token = next_tokens[idx : idx + 1]
+            self.kv_allocator.append_token(request.request_id)
             request.generated_tokens.append(request.next_token)
             request.token_timestamps.append(now)
 
@@ -225,6 +234,7 @@ class ContinuousBatchingEngine:
             request.attention_mask = attention_mask[idx : idx + 1]
             request.past_key_values = self._slice_past(outputs.past_key_values, idx)
             request.next_token = next_tokens[idx : idx + 1]
+            self.kv_allocator.append_token(request.request_id)
             request.generated_tokens.append(request.next_token)
             request.token_timestamps.append(now)
 
@@ -253,6 +263,7 @@ class ContinuousBatchingEngine:
                 optimization="continuous_batching_hf_kv_cache",
             ),
         )
+        self.kv_allocator.free_request(request.request_id)
         request.future.set_result(result)
 
     def _is_finished(self, request: ContinuousRequest) -> bool:

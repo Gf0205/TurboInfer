@@ -64,12 +64,16 @@ class EngineRegistry:
         trust_remote_code: bool,
         max_batch_size: int,
         batch_wait_seconds: float,
+        kv_block_size: int,
+        kv_total_blocks: int,
     ) -> None:
         self.default_model = default_model
         self.device = device
         self.trust_remote_code = trust_remote_code
         self.max_batch_size = max_batch_size
         self.batch_wait_seconds = batch_wait_seconds
+        self.kv_block_size = kv_block_size
+        self.kv_total_blocks = kv_total_blocks
         self._loaded: LoadedEngine | None = None
         self._lock = Lock()
 
@@ -96,6 +100,8 @@ class EngineRegistry:
                     trust_remote_code=self.trust_remote_code,
                     max_batch_size=self.max_batch_size,
                     batch_wait_seconds=self.batch_wait_seconds,
+                    kv_block_size=self.kv_block_size,
+                    kv_total_blocks=self.kv_total_blocks,
                 )
             else:
                 engine_cls = KVCacheEngine if engine_name == "kv-cache" else NaiveEngine
@@ -124,6 +130,8 @@ def create_app(
     trust_remote_code: bool = False,
     max_batch_size: int = 8,
     batch_wait_seconds: float = 0.002,
+    kv_block_size: int = 16,
+    kv_total_blocks: int = 4096,
 ) -> FastAPI:
     app = FastAPI(title="TurboInfer", version="0.1.0")
     registry = EngineRegistry(
@@ -132,6 +140,8 @@ def create_app(
         trust_remote_code=trust_remote_code,
         max_batch_size=max_batch_size,
         batch_wait_seconds=batch_wait_seconds,
+        kv_block_size=kv_block_size,
+        kv_total_blocks=kv_total_blocks,
     )
 
     @app.get("/health", response_model=HealthResponse)
@@ -159,6 +169,8 @@ def create_app(
         served_seconds = time.perf_counter() - started
         metrics = result.metrics.to_dict()
         metrics["served_seconds"] = served_seconds
+        if isinstance(loaded.engine, ContinuousBatchingEngine):
+            metrics["paged_kv_allocator"] = loaded.engine.allocator_stats()
 
         return CompletionResponse(
             id=f"cmpl-{time.time_ns()}",
@@ -191,6 +203,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--max-batch-size", type=int, default=8)
     parser.add_argument("--batch-wait-seconds", type=float, default=0.002)
+    parser.add_argument("--kv-block-size", type=int, default=16)
+    parser.add_argument("--kv-total-blocks", type=int, default=4096)
     return parser
 
 
@@ -202,6 +216,8 @@ def main() -> None:
         trust_remote_code=args.trust_remote_code,
         max_batch_size=args.max_batch_size,
         batch_wait_seconds=args.batch_wait_seconds,
+        kv_block_size=args.kv_block_size,
+        kv_total_blocks=args.kv_total_blocks,
     )
     uvicorn.run(app, host=args.host, port=args.port)
 
