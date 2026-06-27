@@ -22,6 +22,18 @@ def _make_weights(hidden_size: int, num_heads: int, head_dim: int) -> tuple[torc
     return q_weight, k_weight, v_weight
 
 
+def _make_gqa_weights(
+    hidden_size: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    q_weight = torch.randn(num_q_heads * head_dim, hidden_size)
+    k_weight = torch.randn(num_kv_heads * head_dim, hidden_size)
+    v_weight = torch.randn(num_kv_heads * head_dim, hidden_size)
+    return q_weight, k_weight, v_weight
+
+
 def test_project_to_heads_accepts_sequence_and_decode_shapes() -> None:
     torch.manual_seed(0)
     weight = torch.randn(6, 5)
@@ -69,6 +81,48 @@ def test_paged_single_layer_attention_matches_contiguous_reference() -> None:
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
 
+def test_paged_single_layer_gqa_attention_matches_contiguous_reference() -> None:
+    torch.manual_seed(0)
+    batch_size = 2
+    prompt_len = 5
+    hidden_size = 8
+    num_q_heads = 4
+    num_kv_heads = 2
+    head_dim = 2
+    prompt_hidden = torch.randn(batch_size, prompt_len, hidden_size)
+    decode_hidden = torch.randn(batch_size, hidden_size)
+    q_weight, k_weight, v_weight = _make_gqa_weights(
+        hidden_size,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+    )
+
+    expected = contiguous_single_layer_decode_attention(
+        prompt_hidden,
+        decode_hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        num_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    actual = paged_single_layer_decode_attention(
+        prompt_hidden,
+        decode_hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        num_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        block_size=4,
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+
 def test_make_single_layer_paged_inputs_exports_decode_metadata() -> None:
     torch.manual_seed(0)
     prompt_hidden = torch.randn(3, 7, 8)
@@ -88,6 +142,35 @@ def test_make_single_layer_paged_inputs_exports_decode_metadata() -> None:
 
     assert inputs.q.shape == (3, 2, 4)
     assert inputs.buffer.k_cache.shape == (6, 2, 4, 4)
+    assert inputs.block_table.tolist() == [[0, 1], [2, 3], [4, 5]]
+    assert inputs.context_lens.tolist() == [8, 8, 8]
+
+
+def test_make_single_layer_paged_inputs_exports_gqa_metadata() -> None:
+    torch.manual_seed(0)
+    prompt_hidden = torch.randn(3, 7, 8)
+    decode_hidden = torch.randn(3, 8)
+    q_weight, k_weight, v_weight = _make_gqa_weights(
+        hidden_size=8,
+        num_q_heads=4,
+        num_kv_heads=2,
+        head_dim=2,
+    )
+
+    inputs = make_single_layer_paged_inputs(
+        prompt_hidden,
+        decode_hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        num_heads=4,
+        num_kv_heads=2,
+        head_dim=2,
+        block_size=4,
+    )
+
+    assert inputs.q.shape == (3, 4, 2)
+    assert inputs.buffer.k_cache.shape == (6, 2, 4, 2)
     assert inputs.block_table.tolist() == [[0, 1], [2, 3], [4, 5]]
     assert inputs.context_lens.tolist() == [8, 8, 8]
 

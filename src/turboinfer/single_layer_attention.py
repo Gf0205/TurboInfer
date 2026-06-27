@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from turboinfer.kernels.paged_decode_attention import (
     metadata_to_tensors,
     pytorch_paged_decode_attention,
+    pytorch_paged_decode_attention_gqa,
 )
 from turboinfer.paged_allocator import PagedKVAllocator
 from turboinfer.paged_kv_buffer import PagedKVBuffer
@@ -67,6 +68,7 @@ def contiguous_single_layer_decode_attention(
     v_weight: torch.Tensor,
     num_heads: int,
     head_dim: int,
+    num_kv_heads: int | None = None,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     v_bias: torch.Tensor | None = None,
@@ -74,11 +76,12 @@ def contiguous_single_layer_decode_attention(
     """Reference single-layer decode attention over contiguous projected K/V."""
 
     _validate_hidden_inputs(prompt_hidden, decode_hidden)
+    num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
     q = project_to_heads(decode_hidden, q_weight, q_bias, num_heads, head_dim)
-    prompt_k = project_to_heads(prompt_hidden, k_weight, k_bias, num_heads, head_dim)
-    prompt_v = project_to_heads(prompt_hidden, v_weight, v_bias, num_heads, head_dim)
-    decode_k = project_to_heads(decode_hidden, k_weight, k_bias, num_heads, head_dim)
-    decode_v = project_to_heads(decode_hidden, v_weight, v_bias, num_heads, head_dim)
+    prompt_k = project_to_heads(prompt_hidden, k_weight, k_bias, num_kv_heads, head_dim)
+    prompt_v = project_to_heads(prompt_hidden, v_weight, v_bias, num_kv_heads, head_dim)
+    decode_k = project_to_heads(decode_hidden, k_weight, k_bias, num_kv_heads, head_dim)
+    decode_v = project_to_heads(decode_hidden, v_weight, v_bias, num_kv_heads, head_dim)
     keys = torch.cat([prompt_k, decode_k[:, None, :, :]], dim=1)
     values = torch.cat([prompt_v, decode_v[:, None, :, :]], dim=1)
     return contiguous_decode_attention(q, keys, values)
@@ -93,8 +96,8 @@ def contiguous_decode_attention(
 
     Args:
         q: `[batch, num_heads, head_dim]`.
-        keys: `[batch, context_len, num_heads, head_dim]`.
-        values: `[batch, context_len, num_heads, head_dim]`.
+        keys: `[batch, context_len, num_kv_heads, head_dim]`.
+        values: `[batch, context_len, num_kv_heads, head_dim]`.
     """
 
     if q.ndim != 3:
@@ -103,15 +106,20 @@ def contiguous_decode_attention(
         raise ValueError(f"keys and values shapes must match, got {keys.shape} and {values.shape}")
     if keys.ndim != 4:
         raise ValueError(f"keys must have shape [batch, context, heads, dim], got {tuple(keys.shape)}")
-    batch_size, num_heads, head_dim = q.shape
-    if keys.shape[0] != batch_size or keys.shape[2:] != (num_heads, head_dim):
-        raise ValueError("q and K/V batch, heads, and head_dim must match")
+    batch_size, num_q_heads, head_dim = q.shape
+    num_kv_heads = keys.shape[2]
+    if keys.shape[0] != batch_size or keys.shape[3] != head_dim:
+        raise ValueError("q and K/V batch and head_dim must match")
+    if num_q_heads % num_kv_heads != 0:
+        raise ValueError(f"q_heads={num_q_heads} must be divisible by kv_heads={num_kv_heads}")
 
-    keys_by_head = keys.transpose(1, 2)
-    values_by_head = values.transpose(1, 2)
-    scores = torch.matmul(q[:, :, None, :].float(), keys_by_head.float().transpose(-1, -2)).squeeze(2)
+    group_size = num_q_heads // num_kv_heads
+    kv_head_for_q = torch.arange(num_q_heads, device=q.device) // group_size
+    keys_by_q_head = keys.transpose(1, 2)[:, kv_head_for_q, :, :]
+    values_by_q_head = values.transpose(1, 2)[:, kv_head_for_q, :, :]
+    scores = torch.matmul(q[:, :, None, :].float(), keys_by_q_head.float().transpose(-1, -2)).squeeze(2)
     attn = torch.softmax(scores * (head_dim**-0.5), dim=-1)
-    return torch.matmul(attn[:, :, None, :], values_by_head.float()).squeeze(2).to(q.dtype)
+    return torch.matmul(attn[:, :, None, :], values_by_q_head.float()).squeeze(2).to(q.dtype)
 
 
 def make_single_layer_paged_inputs(
@@ -123,6 +131,7 @@ def make_single_layer_paged_inputs(
     num_heads: int,
     head_dim: int,
     block_size: int = 16,
+    num_kv_heads: int | None = None,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     v_bias: torch.Tensor | None = None,
@@ -130,6 +139,7 @@ def make_single_layer_paged_inputs(
     """Project Q/K/V, write K/V to paged storage, and export decode metadata."""
 
     _validate_hidden_inputs(prompt_hidden, decode_hidden)
+    num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
     batch_size, prompt_len, _ = prompt_hidden.shape
     total_context_len = prompt_len + 1
     blocks_per_request = (total_context_len + block_size - 1) // block_size
@@ -137,17 +147,17 @@ def make_single_layer_paged_inputs(
     allocator = PagedKVAllocator(block_size=block_size, total_blocks=total_blocks)
     buffer = PagedKVBuffer(
         allocator=allocator,
-        num_heads=num_heads,
+        num_heads=num_kv_heads,
         head_dim=head_dim,
         dtype=prompt_hidden.dtype,
         device=prompt_hidden.device,
     )
 
     q = project_to_heads(decode_hidden, q_weight, q_bias, num_heads, head_dim)
-    prompt_k = project_to_heads(prompt_hidden, k_weight, k_bias, num_heads, head_dim)
-    prompt_v = project_to_heads(prompt_hidden, v_weight, v_bias, num_heads, head_dim)
-    decode_k = project_to_heads(decode_hidden, k_weight, k_bias, num_heads, head_dim)
-    decode_v = project_to_heads(decode_hidden, v_weight, v_bias, num_heads, head_dim)
+    prompt_k = project_to_heads(prompt_hidden, k_weight, k_bias, num_kv_heads, head_dim)
+    prompt_v = project_to_heads(prompt_hidden, v_weight, v_bias, num_kv_heads, head_dim)
+    decode_k = project_to_heads(decode_hidden, k_weight, k_bias, num_kv_heads, head_dim)
+    decode_v = project_to_heads(decode_hidden, v_weight, v_bias, num_kv_heads, head_dim)
 
     request_ids = list(range(batch_size))
     for request_id in request_ids:
@@ -183,13 +193,21 @@ def paged_single_layer_decode_attention(
     num_heads: int,
     head_dim: int,
     block_size: int = 16,
+    num_kv_heads: int | None = None,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     v_bias: torch.Tensor | None = None,
-    attention_impl: AttentionImpl = pytorch_paged_decode_attention,
+    attention_impl: AttentionImpl | None = None,
 ) -> torch.Tensor:
     """Run projected single-layer decode attention through paged K/V storage."""
 
+    num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+    if attention_impl is None:
+        attention_impl = (
+            pytorch_paged_decode_attention
+            if num_kv_heads == num_heads
+            else pytorch_paged_decode_attention_gqa
+        )
     inputs = make_single_layer_paged_inputs(
         prompt_hidden=prompt_hidden,
         decode_hidden=decode_hidden,
@@ -199,6 +217,7 @@ def paged_single_layer_decode_attention(
         num_heads=num_heads,
         head_dim=head_dim,
         block_size=block_size,
+        num_kv_heads=num_kv_heads,
         q_bias=q_bias,
         k_bias=k_bias,
         v_bias=v_bias,

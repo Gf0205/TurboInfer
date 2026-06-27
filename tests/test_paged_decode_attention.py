@@ -8,7 +8,9 @@ except Exception as exc:  # pragma: no cover - depends on local torch installati
 from turboinfer.kernels.paged_decode_attention import (
     metadata_to_tensors,
     pytorch_paged_decode_attention,
+    pytorch_paged_decode_attention_gqa,
     triton_paged_decode_attention,
+    triton_paged_decode_attention_gqa,
 )
 from turboinfer.paged_allocator import PagedKVAllocator
 
@@ -93,6 +95,42 @@ def test_triton_paged_decode_attention_matches_reference() -> None:
 
     expected = pytorch_paged_decode_attention(q, k_cache, v_cache, block_table, context_lens)
     actual = triton_paged_decode_attention(q, k_cache, v_cache, block_table, context_lens)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=5e-2, atol=5e-2)
+
+
+def test_pytorch_paged_decode_attention_gqa_matches_repeated_kv_reference() -> None:
+    torch.manual_seed(0)
+    q = torch.randn(2, 4, 8, dtype=torch.float32)
+    k_cache = torch.randn(6, 2, 4, 8, dtype=torch.float32)
+    v_cache = torch.randn_like(k_cache)
+    block_table = torch.tensor([[2, 0, -1], [5, 1, 3]], dtype=torch.int32)
+    context_lens = torch.tensor([6, 9], dtype=torch.int32)
+    repeated_k = k_cache.repeat_interleave(2, dim=1)
+    repeated_v = v_cache.repeat_interleave(2, dim=1)
+
+    expected = pytorch_paged_decode_attention(q, repeated_k, repeated_v, block_table, context_lens)
+    actual = pytorch_paged_decode_attention_gqa(q, k_cache, v_cache, block_table, context_lens)
+
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton kernel")
+def test_triton_paged_decode_attention_gqa_matches_reference() -> None:
+    torch.manual_seed(0)
+    q = torch.randn(3, 4, 16, device="cuda", dtype=torch.float16)
+    k_cache = torch.randn(12, 2, 8, 16, device="cuda", dtype=torch.float16)
+    v_cache = torch.randn_like(k_cache)
+    block_table = torch.tensor(
+        [[0, 2, -1], [5, 1, 7], [9, -1, -1]],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    context_lens = torch.tensor([12, 20, 3], device="cuda", dtype=torch.int32)
+
+    expected = pytorch_paged_decode_attention_gqa(q, k_cache, v_cache, block_table, context_lens)
+    actual = triton_paged_decode_attention_gqa(q, k_cache, v_cache, block_table, context_lens)
     torch.cuda.synchronize()
 
     torch.testing.assert_close(actual.float(), expected.float(), rtol=5e-2, atol=5e-2)
