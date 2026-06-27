@@ -68,14 +68,22 @@ Full report: [../../reports/triton-paged-decode-attention-autodl-3090.md](../../
 
 ## Current Boundary
 
-The kernel now validates the paged attention metadata contract, but it is still
-an isolated benchmark. The continuous batching engine records paged metadata,
-while the real model decode path still uses Hugging Face `past_key_values`.
+The first kernel benchmark validates the paged attention metadata contract, but
+it is still an isolated benchmark. The continuous batching engine records paged
+metadata, while the real model decode path still uses Hugging Face
+`past_key_values`.
 
-The next engineering step is to introduce a real paged K/V tensor buffer:
+TurboInfer now also has a focused `PagedKVBuffer` integration benchmark. That
+benchmark validates:
 
-- allocate K/V storage by physical block;
-- write prefill and decode token K/V into the correct block slots;
-- export the tensors and metadata consumed by `triton_paged_decode_attention`;
-- validate the path with a focused integration benchmark before attempting to
-  modify a full Hugging Face model attention module.
+- K/V storage by physical block;
+- prefill K/V writes into the correct block slots;
+- allocator metadata conversion to `block_table` and `context_lens` tensors;
+- `triton_paged_decode_attention` consuming the real paged K/V buffer.
+
+Full integration report:
+[../../reports/paged-kv-buffer-attention-autodl-3090.md](../../reports/paged-kv-buffer-attention-autodl-3090.md).
+
+The next engineering step is a controlled single-layer attention integration
+around Q/K/V projection output. That should come before modifying a full
+Hugging Face model attention module.
