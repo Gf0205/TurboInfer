@@ -72,6 +72,12 @@ Stop the server:
 python scripts/stop_server.py
 ```
 
+## Baseline Meaning
+
+The `kv-cache` HTTP baseline accepts concurrent HTTP requests, but each request still runs through the single-request KV-cache generation path. This measures what happens when multiple requests hit the service without a decode scheduler that forms a real active batch.
+
+The `continuous` engine is the scheduler path. It batches active requests during decode, so it should be compared against the `kv-cache` HTTP baseline for serving throughput and latency under concurrency.
+
 ## What It Measures
 
 The HTTP benchmark records:
@@ -92,4 +98,3 @@ That makes the system useful for understanding continuous batching, but it is no
 
 - TurboInfer v0 shows the scheduler mechanics.
 - vLLM solves the same problem with a production-grade paged KV cache and paged attention kernel.
-
