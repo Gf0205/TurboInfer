@@ -115,6 +115,8 @@
 
 当前服务层入口见 [serving-api.md](serving-api.md)。第一版提供 `/health` 和 `/v1/completions`，后续会把 batching scheduler 接入 API server。
 
+vLLM 对比入口见 [vllm-comparison.md](vllm-comparison.md)。这一阶段用于回答项目与主流推理框架的差距和公平 benchmark 问题。
+
 ## 非目标
 
 - 完全重写 vLLM
