@@ -9,35 +9,15 @@ from __future__ import annotations
 
 import torch
 
-
-def pytorch_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Reference RMSNorm implementation."""
-
-    variance = x.float().pow(2).mean(dim=-1, keepdim=True)
-    y = x.float() * torch.rsqrt(variance + eps)
-    return (y * weight.float()).to(dtype=x.dtype)
-
-
-def _next_power_of_2(value: int) -> int:
-    return 1 << (value - 1).bit_length()
-
-
-def triton_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Run the Triton RMSNorm kernel.
-
-    Triton is imported inside the function so importing turboinfer does not
-    require Triton on CPU-only development machines.
-    """
-
-    if not x.is_cuda or not weight.is_cuda:
-        raise RuntimeError("triton_rmsnorm requires CUDA tensors")
-    if x.ndim != 2:
-        raise ValueError(f"expected a 2D tensor, got shape={tuple(x.shape)}")
-    if weight.ndim != 1 or weight.shape[0] != x.shape[-1]:
-        raise ValueError("weight must be a 1D tensor with length equal to hidden size")
-
+try:
     import triton
     import triton.language as tl
+except ImportError:  # pragma: no cover - exercised on CPU-only machines.
+    triton = None
+    tl = None
+
+
+if triton is not None:
 
     @triton.jit
     def _rmsnorm_kernel(
@@ -60,6 +40,37 @@ def triton_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> 
         output = row * inv_rms * weight_values
 
         tl.store(output_ptr + row_idx * stride_row + offsets, output, mask=mask)
+else:
+    _rmsnorm_kernel = None
+
+
+def pytorch_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Reference RMSNorm implementation."""
+
+    variance = x.float().pow(2).mean(dim=-1, keepdim=True)
+    y = x.float() * torch.rsqrt(variance + eps)
+    return (y * weight.float()).to(dtype=x.dtype)
+
+
+def _next_power_of_2(value: int) -> int:
+    return 1 << (value - 1).bit_length()
+
+
+def triton_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Run the Triton RMSNorm kernel.
+
+    The JIT kernel is defined at module scope because Triton compiles the
+    Python source and needs `tl` to be visible as a module global.
+    """
+
+    if _rmsnorm_kernel is None:
+        raise RuntimeError("triton_rmsnorm requires the triton package")
+    if not x.is_cuda or not weight.is_cuda:
+        raise RuntimeError("triton_rmsnorm requires CUDA tensors")
+    if x.ndim != 2:
+        raise ValueError(f"expected a 2D tensor, got shape={tuple(x.shape)}")
+    if weight.ndim != 1 or weight.shape[0] != x.shape[-1]:
+        raise ValueError("weight must be a 1D tensor with length equal to hidden size")
 
     n_rows, n_cols = x.shape
     block_size = _next_power_of_2(n_cols)
