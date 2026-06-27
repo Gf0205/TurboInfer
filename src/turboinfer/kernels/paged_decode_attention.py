@@ -66,7 +66,7 @@ if triton is not None:
         m_i = -float("inf")
         l_i = 0.0
         acc = tl.zeros([HEAD_DIM], dtype=tl.float32)
-        scale = 1.0 / tl.sqrt(float(HEAD_DIM))
+        scale = HEAD_DIM ** -0.5
 
         logical_block = 0
         num_blocks = tl.cdiv(context_len, BLOCK_SIZE)
