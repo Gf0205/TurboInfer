@@ -123,13 +123,37 @@ class PagedKVBuffer:
         self._validate_token_batch(keys, values)
         if start_token_index < 0:
             raise ValueError("start_token_index must be non-negative")
-        for offset in range(int(keys.shape[0])):
-            self.write_token(
-                request_id=request_id,
-                token_index=start_token_index + offset,
-                key=keys[offset],
-                value=values[offset],
+        token_count = int(keys.shape[0])
+        if token_count == 0:
+            return
+        end_token_index = start_token_index + token_count
+        context_len = self.allocator.context_length(request_id)
+        if end_token_index > context_len:
+            raise IndexError(
+                f"write range [{start_token_index}, {end_token_index}) is outside "
+                f"context length {context_len}"
             )
+
+        source_offset = 0
+        token_index = start_token_index
+        keys = keys.to(device=self.device, dtype=self.dtype)
+        values = values.to(device=self.device, dtype=self.dtype)
+        while token_index < end_token_index:
+            physical_block, block_offset = self.allocator.token_slot(request_id, token_index)
+            tokens_this_block = min(
+                self.block_size - block_offset,
+                end_token_index - token_index,
+            )
+            source_end = source_offset + tokens_this_block
+            block_end = block_offset + tokens_this_block
+            self.k_cache[physical_block, :, block_offset:block_end, :] = keys[
+                source_offset:source_end
+            ].transpose(0, 1)
+            self.v_cache[physical_block, :, block_offset:block_end, :] = values[
+                source_offset:source_end
+            ].transpose(0, 1)
+            source_offset = source_end
+            token_index += tokens_this_block
 
     def write_token(
         self,

@@ -57,6 +57,19 @@ python benchmarks/bench_single_layer_paged_attention.py \
   --iters 50
 ```
 
+## AutoDL RTX 3090 Result
+
+The first AutoDL RTX 3090 run completed successfully:
+
+- test suite: `19 passed in 3.25s`;
+- `paged_triton_attention_ms`: about `0.052 ms` to `0.452 ms`;
+- attention-only speedup versus paged PyTorch reference: about `5.96x` to
+  `53.47x`;
+- best measured paged Triton attention bandwidth estimate: `129.95 GB/s`.
+
+Full report:
+[../../reports/single-layer-paged-attention-autodl-3090.md](../../reports/single-layer-paged-attention-autodl-3090.md).
+
 ## Expected Interpretation
 
 The benchmark intentionally separates:
@@ -85,3 +98,8 @@ and does not implement all model-specific details such as RoPE placement.
 The next step after this benchmark is to use the same controlled integration
 shape with model-specific Qwen2.5 attention details, especially grouped-query
 attention and RoPE, before attempting a full model patch.
+
+The first AutoDL run also exposed a setup bottleneck: prompt K/V was written to
+`PagedKVBuffer` through a Python token loop. `PagedKVBuffer.write_tokens` now
+writes contiguous spans by physical block, so rerunning this benchmark should
+show lower `setup_ms` while leaving attention kernel latency unchanged.

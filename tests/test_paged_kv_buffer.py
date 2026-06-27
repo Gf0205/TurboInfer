@@ -55,6 +55,31 @@ def test_append_decode_token_updates_allocator_and_buffer() -> None:
     torch.testing.assert_close(actual_value, next_value)
 
 
+def test_write_tokens_handles_unaligned_block_slices() -> None:
+    allocator = PagedKVAllocator(block_size=4, total_blocks=8)
+    allocator.allocate_request(request_id=7, prompt_tokens=10)
+    buffer = PagedKVBuffer(allocator, num_heads=2, head_dim=3, dtype=torch.float32)
+    base_keys, base_values = _make_token_kv(tokens=10, heads=2, dim=3)
+    buffer.write_prompt(7, base_keys, base_values)
+    patch_keys = torch.full((5, 2, 3), 77.0)
+    patch_values = torch.full((5, 2, 3), -77.0)
+
+    buffer.write_tokens(
+        request_id=7,
+        start_token_index=2,
+        keys=patch_keys,
+        values=patch_values,
+    )
+
+    expected_keys = base_keys.clone()
+    expected_values = base_values.clone()
+    expected_keys[2:7] = patch_keys
+    expected_values[2:7] = patch_values
+    gathered_keys, gathered_values = buffer.gather_request(7)
+    torch.testing.assert_close(gathered_keys, expected_keys)
+    torch.testing.assert_close(gathered_values, expected_values)
+
+
 def test_paged_buffer_feeds_paged_decode_attention_reference() -> None:
     allocator = PagedKVAllocator(block_size=4, total_blocks=8)
     allocator.allocate_request(request_id=1, prompt_tokens=5)
