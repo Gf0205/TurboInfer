@@ -42,6 +42,8 @@ tests/test_single_layer_attention.py ....
 
 ## Results
 
+First run before block-wise `PagedKVBuffer.write_tokens`:
+
 | Batch | Context Len | Max Diff Ref | Max Diff Triton | Setup ms | Contiguous Full Ref ms | Paged PyTorch Attn ms | Paged Triton Attn ms | Attn Speedup | Triton GB/s |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | 128 | 0.000000 | 0.000000 | 5.4027 | 0.3458 | 0.3741 | 0.0555 | 6.75x | 8.30 |
@@ -53,6 +55,25 @@ tests/test_single_layer_attention.py ....
 | 8 | 128 | 0.031250 | 0.000000 | 41.7510 | 0.3713 | 2.7912 | 0.0522 | 53.47x | 70.58 |
 | 8 | 512 | 0.001953 | 0.031250 | 170.3328 | 0.5302 | 6.4327 | 0.1354 | 47.50x | 108.50 |
 | 8 | 2048 | 0.031250 | 0.015625 | 667.4687 | 1.7517 | 20.7908 | 0.4520 | 46.00x | 129.95 |
+
+After block-wise `PagedKVBuffer.write_tokens`:
+
+| Batch | Context Len | Max Diff Ref | Max Diff Triton | Setup ms | Contiguous Full Ref ms | Paged PyTorch Attn ms | Paged Triton Attn ms | Attn Speedup | Triton GB/s |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 128 | 0.000000 | 0.000000 | 0.6107 | 0.3416 | 0.3761 | 0.0533 | 7.06x | 8.64 |
+| 1 | 512 | 0.000000 | 0.000000 | 1.6033 | 0.3432 | 0.8296 | 0.1026 | 8.09x | 17.91 |
+| 1 | 2048 | 0.000000 | 0.000000 | 5.5755 | 0.3415 | 2.7002 | 0.4360 | 6.19x | 16.84 |
+| 4 | 128 | 0.000004 | 0.000015 | 1.8431 | 0.3813 | 1.4479 | 0.0527 | 27.45x | 34.93 |
+| 4 | 512 | 0.000000 | 0.000000 | 5.7572 | 0.3825 | 3.2604 | 0.1124 | 29.02x | 65.39 |
+| 4 | 2048 | 0.031250 | 0.031250 | 21.5700 | 0.9549 | 10.4660 | 0.4168 | 25.11x | 70.45 |
+| 8 | 128 | 0.031250 | 0.000000 | 3.4075 | 0.3848 | 2.9225 | 0.0530 | 55.18x | 69.57 |
+| 8 | 512 | 0.001953 | 0.031250 | 11.4719 | 0.5134 | 6.4731 | 0.1353 | 47.85x | 108.61 |
+| 8 | 2048 | 0.031250 | 0.015625 | 42.2171 | 1.7511 | 20.7763 | 0.4454 | 46.64x | 131.86 |
+
+Setup improved by about `7.9x` to `15.8x` across the tested shapes. The largest
+case improved from `667.47 ms` to `42.22 ms`, while the Triton attention kernel
+latency stayed in the same range. This confirms that the earlier setup cost was
+mostly the Python token loop in K/V writes, not the paged attention kernel.
 
 ## Interpretation
 
@@ -66,11 +87,11 @@ execution. `paged_triton_attention_ms` ranges from about `0.052 ms` to
 `0.452 ms`, with attention-only speedups from about `5.96x` to `53.47x` against
 the paged PyTorch attention reference.
 
-The large `setup_ms` values are not production decode latency. They include
+The remaining `setup_ms` values are not production decode latency. They include
 rebuilding projected prompt K/V and writing the entire prompt into paged storage
-inside the benchmark loop. This exposes the next engineering bottleneck:
-`PagedKVBuffer.write_prompt` should write by block rather than by Python token
-loop.
+inside the benchmark loop. After block-wise K/V writes, setup is much lower, but
+the benchmark still intentionally rebuilds prompt state every iteration to keep
+the integration path self-contained.
 
 ## Command
 

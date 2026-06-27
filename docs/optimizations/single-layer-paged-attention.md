@@ -101,5 +101,6 @@ attention and RoPE, before attempting a full model patch.
 
 The first AutoDL run also exposed a setup bottleneck: prompt K/V was written to
 `PagedKVBuffer` through a Python token loop. `PagedKVBuffer.write_tokens` now
-writes contiguous spans by physical block, so rerunning this benchmark should
-show lower `setup_ms` while leaving attention kernel latency unchanged.
+writes contiguous spans by physical block. A second AutoDL run confirmed the
+effect: the largest benchmark case improved from `667.47 ms` setup time to
+`42.22 ms`, while attention kernel latency stayed in the same range.
