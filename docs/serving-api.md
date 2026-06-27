@@ -28,6 +28,30 @@ turboinfer-server \
   --port 8000
 ```
 
+## Colab Background Server
+
+Colab notebooks usually run one foreground cell at a time. Use the background helper so the server keeps running while later cells execute benchmarks:
+
+```bash
+python scripts/start_server_background.py \
+  --model Qwen/Qwen2.5-0.5B \
+  --device cuda \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+Check logs:
+
+```bash
+tail -n 80 reports/server.log
+```
+
+Stop the background server:
+
+```bash
+python scripts/stop_server.py
+```
+
 For a quick CPU smoke test with a tiny model:
 
 ```bash
@@ -89,4 +113,3 @@ python benchmarks/bench_http_completions.py \
 - The service does not yet use the static/dynamic batching scheduler internally
 
 The next serving milestone is to connect the request queue and batching scheduler to this API.
-
