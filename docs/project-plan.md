@@ -113,6 +113,8 @@
 - 最终架构图
 - 可用于面试的项目总结
 
+当前服务层入口见 [serving-api.md](serving-api.md)。第一版提供 `/health` 和 `/v1/completions`，后续会把 batching scheduler 接入 API server。
+
 ## 非目标
 
 - 完全重写 vLLM

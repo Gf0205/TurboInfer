@@ -35,6 +35,8 @@
 - 接收 OpenAI 兼容的请求格式（最终版本）
 - 返回生成的文本和时间元数据
 
+当前第一版服务层使用 FastAPI 提供 `/health` 和 `/v1/completions`，详见 [serving-api.md](serving-api.md)。
+
 **基准测试层**：
 
 - 生成工作负载

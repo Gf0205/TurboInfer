@@ -3,4 +3,6 @@ transformers
 accelerate
 sentencepiece
 protobuf
-
+fastapi
+uvicorn
+httpx

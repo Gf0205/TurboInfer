@@ -13,6 +13,9 @@ dependencies = [
   "accelerate",
   "sentencepiece",
   "protobuf",
+  "fastapi",
+  "uvicorn",
+  "httpx",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +25,7 @@ dev = [
 
 [project.scripts]
 turboinfer = "turboinfer.cli:main"
+turboinfer-server = "turboinfer.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
