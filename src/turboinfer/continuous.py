@@ -33,6 +33,28 @@ class ContinuousRequest:
     next_token: torch.Tensor | None = None
 
 
+@dataclass(frozen=True)
+class PagedDecodeTraceStats:
+    decode_steps: int
+    max_batch_size: int
+    max_blocks_per_request: int
+    max_context_len: int
+    last_request_ids: list[int]
+    last_context_lens: list[int]
+    last_block_table_shape: list[int]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "decode_steps": self.decode_steps,
+            "max_batch_size": self.max_batch_size,
+            "max_blocks_per_request": self.max_blocks_per_request,
+            "max_context_len": self.max_context_len,
+            "last_request_ids": self.last_request_ids,
+            "last_context_lens": self.last_context_lens,
+            "last_block_table_shape": self.last_block_table_shape,
+        }
+
+
 class ContinuousBatchingEngine:
     """A small real continuous batching scheduler on top of HF KV cache.
 
@@ -58,6 +80,14 @@ class ContinuousBatchingEngine:
         self.max_batch_size = max_batch_size
         self.batch_wait_seconds = batch_wait_seconds
         self.kv_allocator = PagedKVAllocator(block_size=kv_block_size, total_blocks=kv_total_blocks)
+        self._paged_trace_lock = threading.Lock()
+        self._paged_decode_steps = 0
+        self._paged_max_batch_size = 0
+        self._paged_max_blocks_per_request = 0
+        self._paged_max_context_len = 0
+        self._paged_last_request_ids: list[int] = []
+        self._paged_last_context_lens: list[int] = []
+        self._paged_last_block_table_shape: list[int] = [0, 0]
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
             trust_remote_code=trust_remote_code,
@@ -101,6 +131,18 @@ class ContinuousBatchingEngine:
 
     def allocator_stats(self) -> dict[str, object]:
         return self.kv_allocator.stats().to_dict()
+
+    def paged_decode_trace_stats(self) -> dict[str, object]:
+        with self._paged_trace_lock:
+            return PagedDecodeTraceStats(
+                decode_steps=self._paged_decode_steps,
+                max_batch_size=self._paged_max_batch_size,
+                max_blocks_per_request=self._paged_max_blocks_per_request,
+                max_context_len=self._paged_max_context_len,
+                last_request_ids=list(self._paged_last_request_ids),
+                last_context_lens=list(self._paged_last_context_lens),
+                last_block_table_shape=list(self._paged_last_block_table_shape),
+            ).to_dict()
 
     def _drain_new_requests(self, limit: int, wait: bool) -> list[ContinuousRequest]:
         requests: list[ContinuousRequest] = []
@@ -202,6 +244,7 @@ class ContinuousBatchingEngine:
             request.token_timestamps.append(now)
 
     def _decode_step(self, requests: list[ContinuousRequest]) -> None:
+        self._record_paged_decode_metadata(requests)
         past = self._batch_past([self._require_past(request) for request in requests])
         masks = [self._require_attention_mask(request) for request in requests]
         max_len = max(int(mask.shape[-1]) for mask in masks)
@@ -237,6 +280,30 @@ class ContinuousBatchingEngine:
             self.kv_allocator.append_token(request.request_id)
             request.generated_tokens.append(request.next_token)
             request.token_timestamps.append(now)
+
+    def _record_paged_decode_metadata(self, requests: list[ContinuousRequest]) -> None:
+        metadata = self.kv_allocator.decode_metadata(
+            request_ids=[request.request_id for request in requests],
+        )
+        context_lens = metadata.context_lens
+        block_table_shape = [
+            len(metadata.block_table),
+            metadata.max_blocks_per_request,
+        ]
+        with self._paged_trace_lock:
+            self._paged_decode_steps += 1
+            self._paged_max_batch_size = max(self._paged_max_batch_size, len(requests))
+            self._paged_max_blocks_per_request = max(
+                self._paged_max_blocks_per_request,
+                metadata.max_blocks_per_request,
+            )
+            self._paged_max_context_len = max(
+                self._paged_max_context_len,
+                max(context_lens, default=0),
+            )
+            self._paged_last_request_ids = metadata.request_ids
+            self._paged_last_context_lens = context_lens
+            self._paged_last_block_table_shape = block_table_shape
 
     def _finish(self, request: ContinuousRequest) -> None:
         end_time = time.perf_counter()

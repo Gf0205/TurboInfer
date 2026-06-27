@@ -171,6 +171,7 @@ def create_app(
         metrics["served_seconds"] = served_seconds
         if isinstance(loaded.engine, ContinuousBatchingEngine):
             metrics["paged_kv_allocator"] = loaded.engine.allocator_stats()
+            metrics["paged_decode_trace"] = loaded.engine.paged_decode_trace_stats()
 
         return CompletionResponse(
             id=f"cmpl-{time.time_ns()}",

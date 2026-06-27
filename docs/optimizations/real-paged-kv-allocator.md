@@ -25,6 +25,12 @@ The important runtime contract is:
 
 This is the metadata shape a paged decode attention kernel needs. The current implementation still uses Hugging Face's contiguous legacy cache for actual attention computation, but the allocator now has the same request-to-block indirection layer that a real paged KV path will consume.
 
+The continuous batching engine records this metadata on every decode step via
+`paged_decode_trace`. This keeps the current output path unchanged while making
+the future kernel call site explicit: `_decode_step()` now knows the active
+request ids, padded block table shape, and context lengths before it calls the
+model.
+
 The allocator benchmark includes two baselines:
 
 - `contiguous_full_reservation`: a coarse full-workload reservation baseline;
@@ -99,11 +105,20 @@ Each response's metrics includes:
     "peak_used_blocks": 40,
     "peak_live_requests": 8,
     "utilization": 1.0
+  },
+  "paged_decode_trace": {
+    "decode_steps": 63,
+    "max_batch_size": 8,
+    "max_blocks_per_request": 36,
+    "max_context_len": 575,
+    "last_request_ids": [0, 1, 2, 3, 4, 5, 6, 7],
+    "last_context_lens": [575, 575, 575, 575, 575, 575, 575, 575],
+    "last_block_table_shape": [8, 36]
   }
 }
 ```
 
-The final `used_blocks` may be zero because completed requests release their blocks. The important values are the cumulative counters and peak metrics.
+The final `used_blocks` may be zero because completed requests release their blocks. The important values are the cumulative counters, peak metrics, and decode trace shape.
 
 ## Interview Framing
 
