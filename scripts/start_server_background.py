@@ -19,6 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preload", action="store_true", help="Send a tiny request to load the model.")
     parser.add_argument("--preload-timeout-seconds", type=float, default=300.0)
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--max-batch-size", type=int, default=8)
+    parser.add_argument("--batch-wait-seconds", type=float, default=0.002)
     parser.add_argument("--log-file", default="reports/server.log")
     parser.add_argument("--pid-file", default="reports/server.pid")
     return parser
@@ -71,6 +73,10 @@ def main() -> None:
         args.host,
         "--port",
         str(args.port),
+        "--max-batch-size",
+        str(args.max_batch_size),
+        "--batch-wait-seconds",
+        str(args.batch_wait_seconds),
     ]
     if args.trust_remote_code:
         command.append("--trust-remote-code")

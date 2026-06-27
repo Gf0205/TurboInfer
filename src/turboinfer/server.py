@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from turboinfer.continuous import ContinuousBatchingEngine
 from turboinfer.engine import KVCacheEngine, NaiveEngine
 
 
@@ -18,7 +19,7 @@ class CompletionRequest(BaseModel):
     prompt: str
     max_tokens: int = Field(default=32, ge=1)
     temperature: float = Field(default=0.0)
-    engine: Literal["naive", "kv-cache"] = "kv-cache"
+    engine: Literal["naive", "kv-cache", "continuous"] = "kv-cache"
 
 
 class Usage(BaseModel):
@@ -52,14 +53,23 @@ class HealthResponse(BaseModel):
 class LoadedEngine:
     model_name: str
     engine_name: str
-    engine: NaiveEngine | KVCacheEngine
+    engine: NaiveEngine | KVCacheEngine | ContinuousBatchingEngine
 
 
 class EngineRegistry:
-    def __init__(self, default_model: str | None, device: str, trust_remote_code: bool) -> None:
+    def __init__(
+        self,
+        default_model: str | None,
+        device: str,
+        trust_remote_code: bool,
+        max_batch_size: int,
+        batch_wait_seconds: float,
+    ) -> None:
         self.default_model = default_model
         self.device = device
         self.trust_remote_code = trust_remote_code
+        self.max_batch_size = max_batch_size
+        self.batch_wait_seconds = batch_wait_seconds
         self._loaded: LoadedEngine | None = None
         self._lock = Lock()
 
@@ -79,12 +89,21 @@ class EngineRegistry:
             ):
                 return self._loaded
 
-            engine_cls = KVCacheEngine if engine_name == "kv-cache" else NaiveEngine
-            engine = engine_cls(
-                model_name=model_name,
-                device=self.device,
-                trust_remote_code=self.trust_remote_code,
-            )
+            if engine_name == "continuous":
+                engine = ContinuousBatchingEngine(
+                    model_name=model_name,
+                    device=self.device,
+                    trust_remote_code=self.trust_remote_code,
+                    max_batch_size=self.max_batch_size,
+                    batch_wait_seconds=self.batch_wait_seconds,
+                )
+            else:
+                engine_cls = KVCacheEngine if engine_name == "kv-cache" else NaiveEngine
+                engine = engine_cls(
+                    model_name=model_name,
+                    device=self.device,
+                    trust_remote_code=self.trust_remote_code,
+                )
             self._loaded = LoadedEngine(
                 model_name=model_name,
                 engine_name=engine_name,
@@ -103,12 +122,16 @@ def create_app(
     default_model: str | None = None,
     device: str = "auto",
     trust_remote_code: bool = False,
+    max_batch_size: int = 8,
+    batch_wait_seconds: float = 0.002,
 ) -> FastAPI:
     app = FastAPI(title="TurboInfer", version="0.1.0")
     registry = EngineRegistry(
         default_model=default_model,
         device=device,
         trust_remote_code=trust_remote_code,
+        max_batch_size=max_batch_size,
+        batch_wait_seconds=batch_wait_seconds,
     )
 
     @app.get("/health", response_model=HealthResponse)
@@ -166,6 +189,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--max-batch-size", type=int, default=8)
+    parser.add_argument("--batch-wait-seconds", type=float, default=0.002)
     return parser
 
 
@@ -175,10 +200,11 @@ def main() -> None:
         default_model=args.model,
         device=args.device,
         trust_remote_code=args.trust_remote_code,
+        max_batch_size=args.max_batch_size,
+        batch_wait_seconds=args.batch_wait_seconds,
     )
     uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
     main()
-

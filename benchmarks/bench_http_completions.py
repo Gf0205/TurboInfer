@@ -12,7 +12,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Benchmark TurboInfer /v1/completions over HTTP.")
     parser.add_argument("--url", default="http://127.0.0.1:8000/v1/completions")
     parser.add_argument("--model", default=None)
-    parser.add_argument("--engine", choices=["naive", "kv-cache"], default="kv-cache")
+    parser.add_argument("--engine", choices=["naive", "kv-cache", "continuous"], default="kv-cache")
     parser.add_argument("--prompt", default="Explain why KV cache improves LLM decoding.")
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--num-requests", type=int, default=8)
