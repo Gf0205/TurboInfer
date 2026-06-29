@@ -51,6 +51,11 @@ projection, RoPE, paged K/V writes, paged attention, and output projection.
 Therefore its latency should not be compared directly with
 `paged_triton_attention_ms` from the lower-level benchmark.
 
+The benchmark reports attention-head differences and final hidden-state
+differences separately. The attention-head diff is the cleaner correctness
+signal for paged attention itself; the hidden-state diff can be amplified by the
+output projection, especially when synthetic random weights are used.
+
 Correct claim:
 
 > I built a Qwen-like attention wrapper that compares a contiguous reference path

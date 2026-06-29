@@ -96,10 +96,16 @@ def main() -> None:
                 attention_impl=triton_impl,
             )
             torch.cuda.synchronize()
-            max_abs_diff_paged_ref = (
+            max_abs_diff_heads_paged_ref = (
+                contiguous.attention_heads.float() - paged_ref.attention_heads.float()
+            ).abs().max().item()
+            max_abs_diff_heads_triton = (
+                contiguous.attention_heads.float() - paged_triton.attention_heads.float()
+            ).abs().max().item()
+            max_abs_diff_hidden_paged_ref = (
                 contiguous.hidden_states.float() - paged_ref.hidden_states.float()
             ).abs().max().item()
-            max_abs_diff_triton = (
+            max_abs_diff_hidden_triton = (
                 contiguous.hidden_states.float() - paged_triton.hidden_states.float()
             ).abs().max().item()
 
@@ -126,8 +132,10 @@ def main() -> None:
                     "prompt_len": prompt_len,
                     "use_rope": not args.no_rope,
                     "dtype": args.dtype,
-                    "max_abs_diff_paged_ref": max_abs_diff_paged_ref,
-                    "max_abs_diff_triton": max_abs_diff_triton,
+                    "max_abs_diff_heads_paged_ref": max_abs_diff_heads_paged_ref,
+                    "max_abs_diff_heads_triton": max_abs_diff_heads_triton,
+                    "max_abs_diff_hidden_paged_ref": max_abs_diff_hidden_paged_ref,
+                    "max_abs_diff_hidden_triton": max_abs_diff_hidden_triton,
                     "contiguous_ms": contiguous_ms,
                     "paged_pytorch_ms": paged_ref_ms,
                     "paged_triton_ms": paged_triton_ms,

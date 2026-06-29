@@ -157,9 +157,15 @@ def make_random_qwen_like_attention_weights(
     device: torch.device | str = "cpu",
 ) -> QwenLikeAttentionWeights:
     device = torch.device(device)
+    hidden_scale = profile.hidden_size**-0.5
+    output_scale = profile.q_out_features**-0.5
     return QwenLikeAttentionWeights(
-        q_proj=torch.randn(profile.q_out_features, profile.hidden_size, dtype=dtype, device=device),
-        k_proj=torch.randn(profile.kv_out_features, profile.hidden_size, dtype=dtype, device=device),
-        v_proj=torch.randn(profile.kv_out_features, profile.hidden_size, dtype=dtype, device=device),
-        o_proj=torch.randn(profile.hidden_size, profile.q_out_features, dtype=dtype, device=device),
+        q_proj=torch.randn(profile.q_out_features, profile.hidden_size, dtype=dtype, device=device)
+        * hidden_scale,
+        k_proj=torch.randn(profile.kv_out_features, profile.hidden_size, dtype=dtype, device=device)
+        * hidden_scale,
+        v_proj=torch.randn(profile.kv_out_features, profile.hidden_size, dtype=dtype, device=device)
+        * hidden_scale,
+        o_proj=torch.randn(profile.hidden_size, profile.q_out_features, dtype=dtype, device=device)
+        * output_scale,
     )
