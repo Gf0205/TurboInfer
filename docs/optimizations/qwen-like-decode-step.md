@@ -67,7 +67,8 @@ python benchmarks/bench_qwen_like_decode_breakdown.py \
 For the breakdown benchmark, inspect:
 
 - `qkv_projection_ms`
-- `rope_ms`: decode RoPE using cached cos/sin from prefill state
+- `rope_ms`: decode RoPE using the Triton cached-cos/sin path
+- `cached_pytorch_rope_ms`: cached-cos/sin PyTorch fallback timing
 - `dynamic_trig_rope_ms`: old-style RoPE timing with per-call trigonometric ops
 - `kv_write_ms`
 - `paged_attention_ms`

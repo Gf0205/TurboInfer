@@ -10,7 +10,7 @@ from turboinfer.kernels.paged_decode_attention import (
     pytorch_paged_decode_attention,
     pytorch_paged_decode_attention_gqa,
 )
-from turboinfer.kernels.rope import precompute_rope_angles
+from turboinfer.kernels.rope import precompute_rope_angles, triton_cached_decode_rope
 from turboinfer.model_profiles import ModelProfile, get_model_profile
 from turboinfer.single_layer_attention import (
     AttentionImpl,
@@ -285,8 +285,8 @@ class QwenLikePagedAttention:
             self.profile.head_dim,
         )
         if state.decode_cos is not None and state.decode_sin is not None:
-            q = _apply_split_half_rope_with_cos_sin(q, state.decode_cos, state.decode_sin)
-            decode_k = _apply_split_half_rope_with_cos_sin(decode_k, state.decode_cos, state.decode_sin)
+            q = _apply_decode_rope(q, state.decode_cos, state.decode_sin)
+            decode_k = _apply_decode_rope(decode_k, state.decode_cos, state.decode_sin)
 
         state.buffer.write_token_batch_at_slots(
             physical_blocks=state.decode_physical_blocks,
@@ -366,6 +366,16 @@ def make_random_qwen_like_attention_weights(
 def _apply_split_half_rope_for_qwen_like(x: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
     cos_values = torch.cos(angles).to(device=x.device)
     sin_values = torch.sin(angles).to(device=x.device)
+    return _apply_split_half_rope_with_cos_sin(x, cos_values, sin_values)
+
+
+def _apply_decode_rope(
+    x: torch.Tensor,
+    cos_values: torch.Tensor,
+    sin_values: torch.Tensor,
+) -> torch.Tensor:
+    if x.is_cuda:
+        return triton_cached_decode_rope(x, cos_values, sin_values)
     return _apply_split_half_rope_with_cos_sin(x, cos_values, sin_values)
 
 

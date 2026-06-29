@@ -76,8 +76,69 @@ if triton is not None:
         )
         tl.store(out1_ptrs, out1, mask=head_mask[:, None])
         tl.store(out2_ptrs, out2, mask=head_mask[:, None])
+
+    @triton.jit
+    def _cached_decode_rope_kernel(
+        input_ptr,
+        output_ptr,
+        cos_ptr,
+        sin_ptr,
+        stride_ib: tl.constexpr,
+        stride_ih: tl.constexpr,
+        stride_id: tl.constexpr,
+        stride_ob: tl.constexpr,
+        stride_oh: tl.constexpr,
+        stride_od: tl.constexpr,
+        n_heads: tl.constexpr,
+        head_dim: tl.constexpr,
+        half_dim: tl.constexpr,
+        block_heads: tl.constexpr,
+    ):
+        batch_id = tl.program_id(0)
+        head_group = tl.program_id(1)
+
+        head_offsets = head_group * block_heads + tl.arange(0, block_heads)
+        head_mask = head_offsets < n_heads
+        dim_offsets = tl.arange(0, half_dim)
+
+        cos_values = tl.load(cos_ptr + dim_offsets).to(tl.float32)
+        sin_values = tl.load(sin_ptr + dim_offsets).to(tl.float32)
+
+        x1_ptrs = (
+            input_ptr
+            + batch_id * stride_ib
+            + head_offsets[:, None] * stride_ih
+            + dim_offsets[None, :] * stride_id
+        )
+        x2_ptrs = (
+            input_ptr
+            + batch_id * stride_ib
+            + head_offsets[:, None] * stride_ih
+            + (dim_offsets[None, :] + half_dim) * stride_id
+        )
+        x1 = tl.load(x1_ptrs, mask=head_mask[:, None], other=0.0).to(tl.float32)
+        x2 = tl.load(x2_ptrs, mask=head_mask[:, None], other=0.0).to(tl.float32)
+
+        out1 = x1 * cos_values[None, :] - x2 * sin_values[None, :]
+        out2 = x1 * sin_values[None, :] + x2 * cos_values[None, :]
+
+        out1_ptrs = (
+            output_ptr
+            + batch_id * stride_ob
+            + head_offsets[:, None] * stride_oh
+            + dim_offsets[None, :] * stride_od
+        )
+        out2_ptrs = (
+            output_ptr
+            + batch_id * stride_ob
+            + head_offsets[:, None] * stride_oh
+            + (dim_offsets[None, :] + half_dim) * stride_od
+        )
+        tl.store(out1_ptrs, out1, mask=head_mask[:, None])
+        tl.store(out2_ptrs, out2, mask=head_mask[:, None])
 else:
     _rope_kernel = None
+    _cached_decode_rope_kernel = None
 
 
 def precompute_rope_angles(
@@ -179,3 +240,57 @@ def triton_rope_qk(
     """Run the Triton RoPE kernel for Q and K tensors."""
 
     return triton_rope(q, angles, block_heads=block_heads), triton_rope(k, angles, block_heads=block_heads)
+
+
+def triton_cached_decode_rope(
+    x: torch.Tensor,
+    cos_values: torch.Tensor,
+    sin_values: torch.Tensor,
+    block_heads: int = 4,
+) -> torch.Tensor:
+    """Run RoPE for decode tensors shaped [batch, heads, head_dim].
+
+    `cos_values` and `sin_values` are the cached values for the single decode
+    position, each with shape [head_dim // 2].
+    """
+
+    if _cached_decode_rope_kernel is None:
+        raise RuntimeError("triton_cached_decode_rope requires the triton package")
+    if not x.is_cuda or not cos_values.is_cuda or not sin_values.is_cuda:
+        raise RuntimeError("triton_cached_decode_rope requires CUDA tensors")
+    if x.ndim != 3:
+        raise ValueError(f"expected [batch, heads, head_dim], got shape={tuple(x.shape)}")
+
+    batch_size, n_heads, head_dim = x.shape
+    if head_dim % 2 != 0:
+        raise ValueError(f"head_dim must be even, got {head_dim}")
+    expected_shape = (head_dim // 2,)
+    if tuple(cos_values.shape) != expected_shape or tuple(sin_values.shape) != expected_shape:
+        raise ValueError(
+            f"cos_values and sin_values must have shape {expected_shape}, "
+            f"got {tuple(cos_values.shape)} and {tuple(sin_values.shape)}"
+        )
+
+    x = x.contiguous()
+    cos_values = cos_values.contiguous()
+    sin_values = sin_values.contiguous()
+    output = torch.empty_like(x)
+    grid = (batch_size, triton.cdiv(n_heads, block_heads))
+    _cached_decode_rope_kernel[grid](
+        x,
+        output,
+        cos_values,
+        sin_values,
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        n_heads,
+        head_dim,
+        head_dim // 2,
+        block_heads,
+        num_warps=4,
+    )
+    return output
