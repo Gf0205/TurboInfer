@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from turboinfer.kernels.paged_decode_attention import (
+    metadata_to_tensors,
     pytorch_paged_decode_attention,
     pytorch_paged_decode_attention_gqa,
 )
@@ -15,7 +16,10 @@ from turboinfer.single_layer_attention import (
     AttentionImpl,
     contiguous_single_layer_decode_attention,
     make_single_layer_paged_inputs,
+    project_to_heads,
 )
+from turboinfer.paged_allocator import PagedKVAllocator
+from turboinfer.paged_kv_buffer import PagedKVBuffer
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,14 @@ class QwenLikeAttentionWeights:
 class QwenLikeAttentionOutput:
     hidden_states: torch.Tensor
     attention_heads: torch.Tensor
+
+
+@dataclass
+class QwenLikePagedState:
+    buffer: PagedKVBuffer
+    request_ids: list[int]
+    prompt_len: int
+    reserved_decode_tokens: int
 
 
 class QwenLikePagedAttention:
@@ -127,6 +139,148 @@ class QwenLikePagedAttention:
             attention_heads=attention_heads,
         )
 
+    def prefill(
+        self,
+        prompt_hidden: torch.Tensor,
+        reserve_decode_tokens: int = 1,
+    ) -> QwenLikePagedState:
+        """Project and store prompt K/V once in paged storage.
+
+        `reserve_decode_tokens=1` allocates one extra slot so repeated benchmark
+        iterations can write a single decode token without rebuilding prompt K/V.
+        """
+
+        if prompt_hidden.ndim != 3:
+            raise ValueError(f"prompt_hidden must have shape [batch, seq, hidden], got {tuple(prompt_hidden.shape)}")
+        if reserve_decode_tokens != 1:
+            raise ValueError("only reserve_decode_tokens=1 is supported for the current decode-step path")
+        batch_size, prompt_len, hidden_size = prompt_hidden.shape
+        if hidden_size != self.profile.hidden_size:
+            raise ValueError(f"expected hidden_size={self.profile.hidden_size}, got {hidden_size}")
+
+        total_context_len = prompt_len + reserve_decode_tokens
+        blocks_per_request = (total_context_len + self.profile.block_size - 1) // self.profile.block_size
+        allocator = PagedKVAllocator(
+            block_size=self.profile.block_size,
+            total_blocks=batch_size * blocks_per_request,
+        )
+        buffer = PagedKVBuffer(
+            allocator=allocator,
+            num_heads=self.profile.num_kv_heads,
+            head_dim=self.profile.head_dim,
+            dtype=prompt_hidden.dtype,
+            device=prompt_hidden.device,
+        )
+
+        prompt_k = project_to_heads(
+            prompt_hidden,
+            self.weights.k_proj,
+            self.weights.k_bias,
+            self.profile.num_kv_heads,
+            self.profile.head_dim,
+        )
+        prompt_v = project_to_heads(
+            prompt_hidden,
+            self.weights.v_proj,
+            self.weights.v_bias,
+            self.profile.num_kv_heads,
+            self.profile.head_dim,
+        )
+        rope_angles = self._rope_angles_for_seq(total_context_len, prompt_hidden.device)
+        if rope_angles is not None:
+            prompt_k = _apply_split_half_rope_for_qwen_like(prompt_k, rope_angles[:prompt_len])
+
+        request_ids = list(range(batch_size))
+        for request_id in request_ids:
+            allocator.allocate_request(
+                request_id=request_id,
+                prompt_tokens=total_context_len,
+            )
+            buffer.write_tokens(
+                request_id=request_id,
+                start_token_index=0,
+                keys=prompt_k[request_id],
+                values=prompt_v[request_id],
+            )
+        return QwenLikePagedState(
+            buffer=buffer,
+            request_ids=request_ids,
+            prompt_len=prompt_len,
+            reserved_decode_tokens=reserve_decode_tokens,
+        )
+
+    def decode_reserved(
+        self,
+        state: QwenLikePagedState,
+        decode_hidden: torch.Tensor,
+        attention_impl: AttentionImpl | None = None,
+        decode_slot: int = 0,
+    ) -> QwenLikeAttentionOutput:
+        """Run one decode step against an existing prefilled paged K/V state."""
+
+        if attention_impl is None:
+            attention_impl = (
+                pytorch_paged_decode_attention
+                if self.profile.num_q_heads == self.profile.num_kv_heads
+                else pytorch_paged_decode_attention_gqa
+            )
+        if decode_hidden.ndim != 2:
+            raise ValueError(f"decode_hidden must have shape [batch, hidden], got {tuple(decode_hidden.shape)}")
+        if int(decode_hidden.shape[0]) != len(state.request_ids):
+            raise ValueError("decode_hidden batch size must match the prefilled state")
+        if decode_slot < 0 or decode_slot >= state.reserved_decode_tokens:
+            raise ValueError("decode_slot is outside reserved decode range")
+
+        decode_position = state.prompt_len + decode_slot
+        total_context_len = state.prompt_len + state.reserved_decode_tokens
+        q = project_to_heads(
+            decode_hidden,
+            self.weights.q_proj,
+            self.weights.q_bias,
+            self.profile.num_q_heads,
+            self.profile.head_dim,
+        )
+        decode_k = project_to_heads(
+            decode_hidden,
+            self.weights.k_proj,
+            self.weights.k_bias,
+            self.profile.num_kv_heads,
+            self.profile.head_dim,
+        )
+        decode_v = project_to_heads(
+            decode_hidden,
+            self.weights.v_proj,
+            self.weights.v_bias,
+            self.profile.num_kv_heads,
+            self.profile.head_dim,
+        )
+        rope_angles = self._rope_angles_for_seq(total_context_len, decode_hidden.device)
+        if rope_angles is not None:
+            decode_angle = rope_angles[decode_position]
+            q = _apply_split_half_rope_for_qwen_like(q, decode_angle)
+            decode_k = _apply_split_half_rope_for_qwen_like(decode_k, decode_angle)
+
+        for batch_idx, request_id in enumerate(state.request_ids):
+            state.buffer.write_token(
+                request_id=request_id,
+                token_index=decode_position,
+                key=decode_k[batch_idx],
+                value=decode_v[batch_idx],
+            )
+        metadata = state.buffer.allocator.decode_metadata(request_ids=state.request_ids)
+        block_table, context_lens = metadata_to_tensors(metadata, device=decode_hidden.device)
+        attention_heads = attention_impl(
+            q,
+            state.buffer.k_cache,
+            state.buffer.v_cache,
+            block_table,
+            context_lens,
+        )
+        return QwenLikeAttentionOutput(
+            hidden_states=self._output_project(attention_heads),
+            attention_heads=attention_heads,
+        )
+
     def _rope_angles(
         self,
         prompt_hidden: torch.Tensor,
@@ -141,6 +295,19 @@ class QwenLikePagedAttention:
             head_dim=self.profile.head_dim,
             seq_len=seq_len,
             device=prompt_hidden.device,
+        )
+
+    def _rope_angles_for_seq(
+        self,
+        seq_len: int,
+        device: torch.device | str,
+    ) -> torch.Tensor | None:
+        if not self.use_rope:
+            return None
+        return precompute_rope_angles(
+            head_dim=self.profile.head_dim,
+            seq_len=seq_len,
+            device=device,
         )
 
     def _output_project(self, attention_heads: torch.Tensor) -> torch.Tensor:
@@ -169,3 +336,29 @@ def make_random_qwen_like_attention_weights(
         o_proj=torch.randn(profile.hidden_size, profile.q_out_features, dtype=dtype, device=device)
         * output_scale,
     )
+
+
+def _apply_split_half_rope_for_qwen_like(x: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
+    head_dim = int(x.shape[-1])
+    half_dim = head_dim // 2
+    x_float = x.float()
+    x1 = x_float[..., :half_dim]
+    x2 = x_float[..., half_dim:]
+    cos_values = torch.cos(angles).to(device=x.device)
+    sin_values = torch.sin(angles).to(device=x.device)
+    if x.ndim == 3 and angles.ndim == 1:
+        cos_values = cos_values[None, None, :]
+        sin_values = sin_values[None, None, :]
+    elif x.ndim == 4 and angles.ndim == 2:
+        cos_values = cos_values[None, :, None, :]
+        sin_values = sin_values[None, :, None, :]
+    else:
+        raise ValueError(f"unsupported RoPE broadcast shapes: x={tuple(x.shape)}, angles={tuple(angles.shape)}")
+    out = torch.cat(
+        [
+            x1 * cos_values - x2 * sin_values,
+            x1 * sin_values + x2 * cos_values,
+        ],
+        dim=-1,
+    )
+    return out.to(dtype=x.dtype)
