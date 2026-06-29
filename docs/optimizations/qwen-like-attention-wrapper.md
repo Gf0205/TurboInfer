@@ -56,6 +56,9 @@ differences separately. The attention-head diff is the cleaner correctness
 signal for paged attention itself; the hidden-state diff can be amplified by the
 output projection, especially when synthetic random weights are used.
 
+AutoDL RTX 3090 results are recorded in
+`reports/qwen-like-attention-wrapper-autodl-3090.md`.
+
 Correct claim:
 
 > I built a Qwen-like attention wrapper that compares a contiguous reference path
