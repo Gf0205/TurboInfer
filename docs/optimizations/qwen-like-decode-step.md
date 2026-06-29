@@ -12,13 +12,22 @@ The timed path includes:
 
 - Q/K/V projection for the current decode token
 - RoPE for the current decode token
-- writing the current token's K/V into the reserved paged cache slot
+- batched writing of the current token's K/V into the reserved paged cache slot
 - Triton paged decode attention over the prefilled context
 - output projection
 
 It does not time prompt K/V projection or prompt K/V writes on every iteration.
 That makes it closer to an online serving decode step than the full wrapper
 benchmark, which rebuilds the prompt-side paged state for each timed call.
+
+The block table and context-length tensors are created after prefill and reused
+during repeated decode timing. This mirrors the direction a serving engine would
+take: metadata should be maintained by the scheduler/cache manager, not rebuilt
+from Python lists on every token.
+
+The physical block ids and offsets for the reserved decode slot are also cached
+in the prefilled state, so the repeated decode benchmark does not perform
+allocator slot lookup on every iteration.
 
 ## AutoDL Command
 

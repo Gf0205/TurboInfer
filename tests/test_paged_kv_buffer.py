@@ -55,6 +55,53 @@ def test_append_decode_token_updates_allocator_and_buffer() -> None:
     torch.testing.assert_close(actual_value, next_value)
 
 
+def test_write_token_batch_places_decode_tokens() -> None:
+    allocator = PagedKVAllocator(block_size=4, total_blocks=8)
+    allocator.allocate_request(request_id=1, prompt_tokens=5)
+    allocator.allocate_request(request_id=2, prompt_tokens=6)
+    buffer = PagedKVBuffer(allocator, num_heads=2, head_dim=3, dtype=torch.float32)
+    keys = torch.arange(2 * 2 * 3, dtype=torch.float32).reshape(2, 2, 3)
+    values = keys + 100.0
+
+    buffer.write_token_batch(
+        request_ids=[1, 2],
+        token_indices=[4, 5],
+        keys=keys,
+        values=values,
+    )
+
+    key_1, value_1 = buffer.read_token(1, 4)
+    key_2, value_2 = buffer.read_token(2, 5)
+    torch.testing.assert_close(key_1, keys[0])
+    torch.testing.assert_close(value_1, values[0])
+    torch.testing.assert_close(key_2, keys[1])
+    torch.testing.assert_close(value_2, values[1])
+
+
+def test_write_token_batch_at_slots_places_decode_tokens() -> None:
+    allocator = PagedKVAllocator(block_size=4, total_blocks=8)
+    allocator.allocate_request(request_id=1, prompt_tokens=5)
+    allocator.allocate_request(request_id=2, prompt_tokens=6)
+    buffer = PagedKVBuffer(allocator, num_heads=2, head_dim=3, dtype=torch.float32)
+    keys = torch.arange(2 * 2 * 3, dtype=torch.float32).reshape(2, 2, 3)
+    values = keys + 100.0
+    slots = [allocator.token_slot(1, 4), allocator.token_slot(2, 5)]
+
+    buffer.write_token_batch_at_slots(
+        physical_blocks=torch.tensor([slot[0] for slot in slots], dtype=torch.long),
+        offsets=torch.tensor([slot[1] for slot in slots], dtype=torch.long),
+        keys=keys,
+        values=values,
+    )
+
+    key_1, value_1 = buffer.read_token(1, 4)
+    key_2, value_2 = buffer.read_token(2, 5)
+    torch.testing.assert_close(key_1, keys[0])
+    torch.testing.assert_close(value_1, values[0])
+    torch.testing.assert_close(key_2, keys[1])
+    torch.testing.assert_close(value_2, values[1])
+
+
 def test_write_tokens_handles_unaligned_block_slices() -> None:
     allocator = PagedKVAllocator(block_size=4, total_blocks=8)
     allocator.allocate_request(request_id=7, prompt_tokens=10)

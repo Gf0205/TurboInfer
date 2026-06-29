@@ -173,6 +173,62 @@ class PagedKVBuffer:
             dtype=self.dtype,
         )
 
+    def write_token_batch(
+        self,
+        request_ids: list[int],
+        token_indices: list[int],
+        keys: torch.Tensor,
+        values: torch.Tensor,
+    ) -> None:
+        """Write one token for each request with a single tensor assignment."""
+
+        if len(request_ids) != len(token_indices):
+            raise ValueError("request_ids and token_indices must have the same length")
+        if keys.shape != values.shape:
+            raise ValueError(f"keys and values shapes must match, got {keys.shape} and {values.shape}")
+        expected_shape = (len(request_ids), self.num_heads, self.head_dim)
+        if keys.ndim != 3 or tuple(keys.shape) != expected_shape:
+            raise ValueError(
+                "keys and values must have shape "
+                f"[{len(request_ids)}, {self.num_heads}, {self.head_dim}], got {tuple(keys.shape)}"
+            )
+        if not request_ids:
+            return
+
+        slots = [self.allocator.token_slot(request_id, token_index) for request_id, token_index in zip(request_ids, token_indices)]
+        physical_blocks = torch.tensor([slot[0] for slot in slots], device=self.device, dtype=torch.long)
+        offsets = torch.tensor([slot[1] for slot in slots], device=self.device, dtype=torch.long)
+        self.write_token_batch_at_slots(physical_blocks, offsets, keys, values)
+
+    def write_token_batch_at_slots(
+        self,
+        physical_blocks: torch.Tensor,
+        offsets: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+    ) -> None:
+        """Write batched K/V using precomputed physical block slots."""
+
+        if physical_blocks.ndim != 1 or offsets.ndim != 1:
+            raise ValueError("physical_blocks and offsets must be 1D tensors")
+        if int(physical_blocks.shape[0]) != int(offsets.shape[0]):
+            raise ValueError("physical_blocks and offsets must have the same length")
+        if keys.shape != values.shape:
+            raise ValueError(f"keys and values shapes must match, got {keys.shape} and {values.shape}")
+        expected_shape = (int(physical_blocks.shape[0]), self.num_heads, self.head_dim)
+        if keys.ndim != 3 or tuple(keys.shape) != expected_shape:
+            raise ValueError(
+                "keys and values must have shape "
+                f"[{expected_shape[0]}, {self.num_heads}, {self.head_dim}], got {tuple(keys.shape)}"
+            )
+        if expected_shape[0] == 0:
+            return
+
+        physical_blocks = physical_blocks.to(device=self.device, dtype=torch.long)
+        offsets = offsets.to(device=self.device, dtype=torch.long)
+        self.k_cache[physical_blocks, :, offsets, :] = keys.to(device=self.device, dtype=self.dtype)
+        self.v_cache[physical_blocks, :, offsets, :] = values.to(device=self.device, dtype=self.dtype)
+
     def read_token(self, request_id: int, token_index: int) -> tuple[torch.Tensor, torch.Tensor]:
         physical_block, offset = self.allocator.token_slot(request_id, token_index)
         return (

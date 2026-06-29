@@ -46,6 +46,10 @@ class QwenLikePagedState:
     request_ids: list[int]
     prompt_len: int
     reserved_decode_tokens: int
+    block_table: torch.Tensor
+    context_lens: torch.Tensor
+    decode_physical_blocks: torch.Tensor
+    decode_offsets: torch.Tensor
 
 
 class QwenLikePagedAttention:
@@ -202,11 +206,28 @@ class QwenLikePagedAttention:
                 keys=prompt_k[request_id],
                 values=prompt_v[request_id],
             )
+        metadata = allocator.decode_metadata(request_ids=request_ids)
+        block_table, context_lens = metadata_to_tensors(metadata, device=prompt_hidden.device)
+        decode_slots = [allocator.token_slot(request_id, prompt_len) for request_id in request_ids]
+        decode_physical_blocks = torch.tensor(
+            [slot[0] for slot in decode_slots],
+            device=prompt_hidden.device,
+            dtype=torch.long,
+        )
+        decode_offsets = torch.tensor(
+            [slot[1] for slot in decode_slots],
+            device=prompt_hidden.device,
+            dtype=torch.long,
+        )
         return QwenLikePagedState(
             buffer=buffer,
             request_ids=request_ids,
             prompt_len=prompt_len,
             reserved_decode_tokens=reserve_decode_tokens,
+            block_table=block_table,
+            context_lens=context_lens,
+            decode_physical_blocks=decode_physical_blocks,
+            decode_offsets=decode_offsets,
         )
 
     def decode_reserved(
@@ -260,21 +281,18 @@ class QwenLikePagedAttention:
             q = _apply_split_half_rope_for_qwen_like(q, decode_angle)
             decode_k = _apply_split_half_rope_for_qwen_like(decode_k, decode_angle)
 
-        for batch_idx, request_id in enumerate(state.request_ids):
-            state.buffer.write_token(
-                request_id=request_id,
-                token_index=decode_position,
-                key=decode_k[batch_idx],
-                value=decode_v[batch_idx],
-            )
-        metadata = state.buffer.allocator.decode_metadata(request_ids=state.request_ids)
-        block_table, context_lens = metadata_to_tensors(metadata, device=decode_hidden.device)
+        state.buffer.write_token_batch_at_slots(
+            physical_blocks=state.decode_physical_blocks,
+            offsets=state.decode_offsets,
+            keys=decode_k,
+            values=decode_v,
+        )
         attention_heads = attention_impl(
             q,
             state.buffer.k_cache,
             state.buffer.v_cache,
-            block_table,
-            context_lens,
+            state.block_table,
+            state.context_lens,
         )
         return QwenLikeAttentionOutput(
             hidden_states=self._output_project(attention_heads),
