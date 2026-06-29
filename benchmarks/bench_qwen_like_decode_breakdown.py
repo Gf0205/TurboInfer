@@ -16,6 +16,7 @@ from turboinfer.model_profiles import MODEL_PROFILES, get_model_profile
 from turboinfer.qwen_like_attention import (
     QwenLikePagedAttention,
     _apply_split_half_rope_for_qwen_like,
+    _apply_split_half_rope_with_cos_sin,
 )
 from turboinfer.single_layer_attention import project_to_heads
 
@@ -117,9 +118,9 @@ def main() -> None:
                 profile.num_kv_heads,
                 profile.head_dim,
             )
-            if decode_angle is not None:
-                q_for_attention = _apply_split_half_rope_for_qwen_like(q, decode_angle)
-                k_for_cache = _apply_split_half_rope_for_qwen_like(decode_k, decode_angle)
+            if state.decode_cos is not None and state.decode_sin is not None:
+                q_for_attention = _apply_split_half_rope_with_cos_sin(q, state.decode_cos, state.decode_sin)
+                k_for_cache = _apply_split_half_rope_with_cos_sin(decode_k, state.decode_cos, state.decode_sin)
             else:
                 q_for_attention = q
                 k_for_cache = decode_k
@@ -166,6 +167,14 @@ def main() -> None:
                 )
 
             def rope_step() -> tuple[torch.Tensor, torch.Tensor]:
+                if state.decode_cos is None or state.decode_sin is None:
+                    return q, decode_k
+                return (
+                    _apply_split_half_rope_with_cos_sin(q, state.decode_cos, state.decode_sin),
+                    _apply_split_half_rope_with_cos_sin(decode_k, state.decode_cos, state.decode_sin),
+                )
+
+            def rope_with_dynamic_trig() -> tuple[torch.Tensor, torch.Tensor]:
                 if decode_angle is None:
                     return q, decode_k
                 return (
@@ -195,6 +204,7 @@ def main() -> None:
 
             qkv_ms = time_cuda(qkv_projection, args.warmup, args.iters)
             rope_ms = time_cuda(rope_step, args.warmup, args.iters)
+            dynamic_rope_ms = time_cuda(rope_with_dynamic_trig, args.warmup, args.iters)
             kv_write_ms = time_cuda(kv_write, args.warmup, args.iters)
             attention_ms = time_cuda(paged_attention, args.warmup, args.iters)
             output_ms = time_cuda(output_projection, args.warmup, args.iters)
@@ -217,6 +227,7 @@ def main() -> None:
                     "max_abs_diff_hidden": max_abs_diff_hidden,
                     "qkv_projection_ms": qkv_ms,
                     "rope_ms": rope_ms,
+                    "dynamic_trig_rope_ms": dynamic_rope_ms,
                     "kv_write_ms": kv_write_ms,
                     "paged_attention_ms": attention_ms,
                     "output_projection_ms": output_ms,

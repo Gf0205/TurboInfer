@@ -63,6 +63,33 @@ The next question is where the remaining 0.66-0.69 ms goes. The follow-up
 breakdown benchmark separates Q/K/V projection, RoPE, K/V write, paged
 attention, and output projection.
 
+## Breakdown Before Cached RoPE
+
+The first breakdown run showed that dynamic decode RoPE was the largest
+component for short and medium contexts:
+
+| Batch | Context | QKV ms | RoPE ms | KV write ms | Paged attention ms | O proj ms | Full decode ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 128 | 0.052 | 0.308 | 0.046 | 0.055 | 0.017 | 0.659 |
+| 1 | 512 | 0.052 | 0.307 | 0.041 | 0.102 | 0.018 | 0.683 |
+| 1 | 2048 | 0.052 | 0.296 | 0.040 | 0.399 | 0.018 | 0.663 |
+| 4 | 128 | 0.073 | 0.285 | 0.040 | 0.056 | 0.023 | 0.685 |
+| 4 | 512 | 0.077 | 0.294 | 0.038 | 0.090 | 0.023 | 0.699 |
+| 4 | 2048 | 0.073 | 0.282 | 0.039 | 0.353 | 0.021 | 0.693 |
+| 8 | 128 | 0.069 | 0.281 | 0.038 | 0.054 | 0.022 | 0.688 |
+| 8 | 512 | 0.072 | 0.283 | 0.039 | 0.108 | 0.023 | 0.683 |
+| 8 | 2048 | 0.067 | 0.278 | 0.038 | 0.423 | 0.022 | 0.710 |
+
+This points to two different regimes:
+
+- short/medium context: dynamic RoPE dominates because it computes trigonometric
+  values during every decode step;
+- long context: paged attention grows with context length and becomes the
+  largest component.
+
+The next implementation change caches decode-position cos/sin values in the
+prefilled state, so the decode path performs only RoPE multiply/add work.
+
 ## Boundary
 
 This is still a single-layer controlled wrapper, not a full Hugging Face model

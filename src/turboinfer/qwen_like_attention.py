@@ -50,6 +50,8 @@ class QwenLikePagedState:
     context_lens: torch.Tensor
     decode_physical_blocks: torch.Tensor
     decode_offsets: torch.Tensor
+    decode_cos: torch.Tensor | None
+    decode_sin: torch.Tensor | None
 
 
 class QwenLikePagedAttention:
@@ -206,6 +208,13 @@ class QwenLikePagedAttention:
                 keys=prompt_k[request_id],
                 values=prompt_v[request_id],
             )
+        decode_cos = None
+        decode_sin = None
+        if rope_angles is not None:
+            decode_angle = rope_angles[prompt_len]
+            decode_cos = torch.cos(decode_angle)
+            decode_sin = torch.sin(decode_angle)
+
         metadata = allocator.decode_metadata(request_ids=request_ids)
         block_table, context_lens = metadata_to_tensors(metadata, device=prompt_hidden.device)
         decode_slots = [allocator.token_slot(request_id, prompt_len) for request_id in request_ids]
@@ -228,6 +237,8 @@ class QwenLikePagedAttention:
             context_lens=context_lens,
             decode_physical_blocks=decode_physical_blocks,
             decode_offsets=decode_offsets,
+            decode_cos=decode_cos,
+            decode_sin=decode_sin,
         )
 
     def decode_reserved(
@@ -252,8 +263,6 @@ class QwenLikePagedAttention:
         if decode_slot < 0 or decode_slot >= state.reserved_decode_tokens:
             raise ValueError("decode_slot is outside reserved decode range")
 
-        decode_position = state.prompt_len + decode_slot
-        total_context_len = state.prompt_len + state.reserved_decode_tokens
         q = project_to_heads(
             decode_hidden,
             self.weights.q_proj,
@@ -275,11 +284,9 @@ class QwenLikePagedAttention:
             self.profile.num_kv_heads,
             self.profile.head_dim,
         )
-        rope_angles = self._rope_angles_for_seq(total_context_len, decode_hidden.device)
-        if rope_angles is not None:
-            decode_angle = rope_angles[decode_position]
-            q = _apply_split_half_rope_for_qwen_like(q, decode_angle)
-            decode_k = _apply_split_half_rope_for_qwen_like(decode_k, decode_angle)
+        if state.decode_cos is not None and state.decode_sin is not None:
+            q = _apply_split_half_rope_with_cos_sin(q, state.decode_cos, state.decode_sin)
+            decode_k = _apply_split_half_rope_with_cos_sin(decode_k, state.decode_cos, state.decode_sin)
 
         state.buffer.write_token_batch_at_slots(
             physical_blocks=state.decode_physical_blocks,
@@ -357,21 +364,38 @@ def make_random_qwen_like_attention_weights(
 
 
 def _apply_split_half_rope_for_qwen_like(x: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
+    cos_values = torch.cos(angles).to(device=x.device)
+    sin_values = torch.sin(angles).to(device=x.device)
+    return _apply_split_half_rope_with_cos_sin(x, cos_values, sin_values)
+
+
+def _apply_split_half_rope_with_cos_sin(
+    x: torch.Tensor,
+    cos_values: torch.Tensor,
+    sin_values: torch.Tensor,
+) -> torch.Tensor:
     head_dim = int(x.shape[-1])
     half_dim = head_dim // 2
     x_float = x.float()
     x1 = x_float[..., :half_dim]
     x2 = x_float[..., half_dim:]
-    cos_values = torch.cos(angles).to(device=x.device)
-    sin_values = torch.sin(angles).to(device=x.device)
-    if x.ndim == 3 and angles.ndim == 1:
+    cos_values = cos_values.to(device=x.device)
+    sin_values = sin_values.to(device=x.device)
+    if x.ndim == 3 and cos_values.ndim == 1:
         cos_values = cos_values[None, None, :]
         sin_values = sin_values[None, None, :]
-    elif x.ndim == 4 and angles.ndim == 2:
+    elif x.ndim == 4 and cos_values.ndim == 2:
         cos_values = cos_values[None, :, None, :]
         sin_values = sin_values[None, :, None, :]
+    elif x.ndim == 3 and cos_values.ndim == 3:
+        pass
+    elif x.ndim == 4 and cos_values.ndim == 4:
+        pass
     else:
-        raise ValueError(f"unsupported RoPE broadcast shapes: x={tuple(x.shape)}, angles={tuple(angles.shape)}")
+        raise ValueError(
+            "unsupported RoPE broadcast shapes: "
+            f"x={tuple(x.shape)}, cos={tuple(cos_values.shape)}, sin={tuple(sin_values.shape)}"
+        )
     out = torch.cat(
         [
             x1 * cos_values - x2 * sin_values,
