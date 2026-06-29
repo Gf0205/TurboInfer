@@ -67,7 +67,8 @@ python benchmarks/bench_qwen_like_decode_breakdown.py \
 For the breakdown benchmark, inspect:
 
 - `qkv_projection_ms`
-- `rope_ms`: decode RoPE using the Triton cached-cos/sin path
+- `rope_ms`: fused Q/K decode RoPE using one Triton cached-cos/sin launch
+- `separate_triton_rope_ms`: previous Q and K Triton RoPE as two launches
 - `cached_pytorch_rope_ms`: cached-cos/sin PyTorch fallback timing
 - `dynamic_trig_rope_ms`: old-style RoPE timing with per-call trigonometric ops
 - `kv_write_ms`

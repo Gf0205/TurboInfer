@@ -90,6 +90,42 @@ This points to two different regimes:
 The next implementation change caches decode-position cos/sin values in the
 prefilled state, so the decode path performs only RoPE multiply/add work.
 
+## Triton Cached Decode RoPE
+
+Replacing the PyTorch decode RoPE path with a decode-only Triton kernel reduces
+the short and medium context path again.
+
+| Batch | Context | Contiguous ref ms | Prefilled paged Triton ms | Speedup | Hidden max diff |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 128 | 1.019 | 0.324 | 3.14x | 0.0000076 |
+| 1 | 512 | 1.308 | 0.360 | 3.63x | 0.000015 |
+| 1 | 2048 | 1.061 | 0.429 | 2.47x | 0.000061 |
+| 4 | 128 | 1.096 | 0.350 | 3.13x | 0.000244 |
+| 4 | 512 | 1.090 | 0.344 | 3.17x | 0.000061 |
+| 4 | 2048 | 1.089 | 0.434 | 2.51x | 0.000061 |
+| 8 | 128 | 1.109 | 0.357 | 3.11x | 0.000244 |
+| 8 | 512 | 1.089 | 0.343 | 3.18x | 0.000244 |
+| 8 | 2048 | 1.224 | 0.466 | 2.62x | 0.000061 |
+
+The corresponding breakdown shows that `rope_ms` drops from cached PyTorch
+RoPE's roughly 0.24-0.26 ms to Triton's roughly 0.08-0.09 ms for most shapes:
+
+| Batch | Context | QKV ms | Triton RoPE ms | Cached PyTorch RoPE ms | Dynamic RoPE ms | KV write ms | Paged attention ms | O proj ms | Full decode ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 128 | 0.060 | 0.086 | 0.248 | 0.300 | 0.048 | 0.105 | 0.038 | 0.328 |
+| 1 | 512 | 0.106 | 0.086 | 0.260 | 0.394 | 0.072 | 0.102 | 0.018 | 0.370 |
+| 1 | 2048 | 0.092 | 0.167 | 0.241 | 0.347 | 0.041 | 0.399 | 0.020 | 0.428 |
+| 4 | 128 | 0.073 | 0.085 | 0.265 | 0.285 | 0.039 | 0.059 | 0.023 | 0.353 |
+| 4 | 512 | 0.072 | 0.081 | 0.242 | 0.289 | 0.039 | 0.089 | 0.023 | 0.398 |
+| 4 | 2048 | 0.073 | 0.086 | 0.257 | 0.295 | 0.041 | 0.348 | 0.022 | 0.426 |
+| 8 | 128 | 0.072 | 0.091 | 0.243 | 0.290 | 0.042 | 0.071 | 0.023 | 0.356 |
+| 8 | 512 | 0.074 | 0.093 | 0.250 | 0.306 | 0.040 | 0.108 | 0.023 | 0.357 |
+| 8 | 2048 | 0.076 | 0.093 | 0.262 | 0.310 | 0.041 | 0.424 | 0.023 | 0.465 |
+
+After this change, long context is mostly limited by paged attention. Short
+context still has visible RoPE launch overhead because Q and K RoPE are two
+separate small Triton launches.
+
 ## Boundary
 
 This is still a single-layer controlled wrapper, not a full Hugging Face model

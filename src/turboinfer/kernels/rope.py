@@ -136,9 +136,108 @@ if triton is not None:
         )
         tl.store(out1_ptrs, out1, mask=head_mask[:, None])
         tl.store(out2_ptrs, out2, mask=head_mask[:, None])
+
+    @triton.jit
+    def _cached_decode_rope_qk_kernel(
+        q_ptr,
+        k_ptr,
+        q_out_ptr,
+        k_out_ptr,
+        cos_ptr,
+        sin_ptr,
+        q_stride_b: tl.constexpr,
+        q_stride_h: tl.constexpr,
+        q_stride_d: tl.constexpr,
+        k_stride_b: tl.constexpr,
+        k_stride_h: tl.constexpr,
+        k_stride_d: tl.constexpr,
+        qo_stride_b: tl.constexpr,
+        qo_stride_h: tl.constexpr,
+        qo_stride_d: tl.constexpr,
+        ko_stride_b: tl.constexpr,
+        ko_stride_h: tl.constexpr,
+        ko_stride_d: tl.constexpr,
+        q_heads: tl.constexpr,
+        kv_heads: tl.constexpr,
+        head_dim: tl.constexpr,
+        half_dim: tl.constexpr,
+        block_heads: tl.constexpr,
+    ):
+        batch_id = tl.program_id(0)
+        head_group = tl.program_id(1)
+
+        head_offsets = head_group * block_heads + tl.arange(0, block_heads)
+        dim_offsets = tl.arange(0, half_dim)
+        cos_values = tl.load(cos_ptr + dim_offsets).to(tl.float32)
+        sin_values = tl.load(sin_ptr + dim_offsets).to(tl.float32)
+
+        q_mask = head_offsets < q_heads
+        q1_ptrs = (
+            q_ptr
+            + batch_id * q_stride_b
+            + head_offsets[:, None] * q_stride_h
+            + dim_offsets[None, :] * q_stride_d
+        )
+        q2_ptrs = (
+            q_ptr
+            + batch_id * q_stride_b
+            + head_offsets[:, None] * q_stride_h
+            + (dim_offsets[None, :] + half_dim) * q_stride_d
+        )
+        q1 = tl.load(q1_ptrs, mask=q_mask[:, None], other=0.0).to(tl.float32)
+        q2 = tl.load(q2_ptrs, mask=q_mask[:, None], other=0.0).to(tl.float32)
+        q_out1 = q1 * cos_values[None, :] - q2 * sin_values[None, :]
+        q_out2 = q1 * sin_values[None, :] + q2 * cos_values[None, :]
+        qo1_ptrs = (
+            q_out_ptr
+            + batch_id * qo_stride_b
+            + head_offsets[:, None] * qo_stride_h
+            + dim_offsets[None, :] * qo_stride_d
+        )
+        qo2_ptrs = (
+            q_out_ptr
+            + batch_id * qo_stride_b
+            + head_offsets[:, None] * qo_stride_h
+            + (dim_offsets[None, :] + half_dim) * qo_stride_d
+        )
+        tl.store(qo1_ptrs, q_out1, mask=q_mask[:, None])
+        tl.store(qo2_ptrs, q_out2, mask=q_mask[:, None])
+
+        k_mask = head_offsets < kv_heads
+        k1_ptrs = (
+            k_ptr
+            + batch_id * k_stride_b
+            + head_offsets[:, None] * k_stride_h
+            + dim_offsets[None, :] * k_stride_d
+        )
+        k2_ptrs = (
+            k_ptr
+            + batch_id * k_stride_b
+            + head_offsets[:, None] * k_stride_h
+            + (dim_offsets[None, :] + half_dim) * k_stride_d
+        )
+        k1 = tl.load(k1_ptrs, mask=k_mask[:, None], other=0.0).to(tl.float32)
+        k2 = tl.load(k2_ptrs, mask=k_mask[:, None], other=0.0).to(tl.float32)
+        k_out1 = k1 * cos_values[None, :] - k2 * sin_values[None, :]
+        k_out2 = k1 * sin_values[None, :] + k2 * cos_values[None, :]
+        ko1_ptrs = (
+            k_out_ptr
+            + batch_id * ko_stride_b
+            + head_offsets[:, None] * ko_stride_h
+            + dim_offsets[None, :] * ko_stride_d
+        )
+        ko2_ptrs = (
+            k_out_ptr
+            + batch_id * ko_stride_b
+            + head_offsets[:, None] * ko_stride_h
+            + (dim_offsets[None, :] + half_dim) * ko_stride_d
+        )
+        tl.store(ko1_ptrs, k_out1, mask=k_mask[:, None])
+        tl.store(ko2_ptrs, k_out2, mask=k_mask[:, None])
 else:
     _rope_kernel = None
     _cached_decode_rope_kernel = None
+    _cached_decode_rope_qk_kernel = None
 
 
 def precompute_rope_angles(
@@ -294,3 +393,68 @@ def triton_cached_decode_rope(
         num_warps=4,
     )
     return output
+
+
+def triton_cached_decode_rope_qk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos_values: torch.Tensor,
+    sin_values: torch.Tensor,
+    block_heads: int = 4,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run cached decode RoPE for Q and K with one Triton launch."""
+
+    if _cached_decode_rope_qk_kernel is None:
+        raise RuntimeError("triton_cached_decode_rope_qk requires the triton package")
+    if not all(tensor.is_cuda for tensor in (q, k, cos_values, sin_values)):
+        raise RuntimeError("triton_cached_decode_rope_qk requires CUDA tensors")
+    if q.ndim != 3 or k.ndim != 3:
+        raise ValueError(f"expected q and k as [batch, heads, head_dim], got {tuple(q.shape)} and {tuple(k.shape)}")
+    if int(q.shape[0]) != int(k.shape[0]) or int(q.shape[2]) != int(k.shape[2]):
+        raise ValueError("q and k must have the same batch size and head_dim")
+
+    batch_size, q_heads, head_dim = q.shape
+    kv_heads = int(k.shape[1])
+    if head_dim % 2 != 0:
+        raise ValueError(f"head_dim must be even, got {head_dim}")
+    expected_shape = (head_dim // 2,)
+    if tuple(cos_values.shape) != expected_shape or tuple(sin_values.shape) != expected_shape:
+        raise ValueError(
+            f"cos_values and sin_values must have shape {expected_shape}, "
+            f"got {tuple(cos_values.shape)} and {tuple(sin_values.shape)}"
+        )
+
+    q = q.contiguous()
+    k = k.contiguous()
+    cos_values = cos_values.contiguous()
+    sin_values = sin_values.contiguous()
+    q_out = torch.empty_like(q)
+    k_out = torch.empty_like(k)
+    grid = (batch_size, triton.cdiv(max(q_heads, kv_heads), block_heads))
+    _cached_decode_rope_qk_kernel[grid](
+        q,
+        k,
+        q_out,
+        k_out,
+        cos_values,
+        sin_values,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        q_out.stride(0),
+        q_out.stride(1),
+        q_out.stride(2),
+        k_out.stride(0),
+        k_out.stride(1),
+        k_out.stride(2),
+        q_heads,
+        kv_heads,
+        head_dim,
+        head_dim // 2,
+        block_heads,
+        num_warps=4,
+    )
+    return q_out, k_out
