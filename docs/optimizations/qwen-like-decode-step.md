@@ -41,6 +41,18 @@ python benchmarks/bench_qwen_like_decode_step.py \
   --iters 100
 ```
 
+To find the next bottleneck inside the decode step, run:
+
+```bash
+python benchmarks/bench_qwen_like_decode_breakdown.py \
+  --profile qwen2.5-0.5b \
+  --batch-sizes 1 4 8 \
+  --context-lens 128 512 2048 \
+  --dtype float16 \
+  --warmup 25 \
+  --iters 100
+```
+
 ## Fields To Watch
 
 - `max_abs_diff_heads_triton`: attention-head difference against the contiguous
@@ -51,6 +63,15 @@ python benchmarks/bench_qwen_like_decode_step.py \
   path.
 - `speedup_vs_contiguous_reference`: a controlled reference comparison, not an
   end-to-end vLLM comparison.
+
+For the breakdown benchmark, inspect:
+
+- `qkv_projection_ms`
+- `rope_ms`
+- `kv_write_ms`
+- `paged_attention_ms`
+- `output_projection_ms`
+- `full_decode_ms`
 
 ## Current Boundary
 
