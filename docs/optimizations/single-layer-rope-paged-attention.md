@@ -60,6 +60,9 @@ reference with RoPE enabled. The expected performance signal is that the Triton
 paged attention kernel remains much faster than the readable PyTorch paged
 attention reference, while setup time now includes RoPE work.
 
+AutoDL RTX 3090 results are recorded in
+`reports/single-layer-rope-paged-attention-autodl-3090.md`.
+
 Do not present this as end-to-end model acceleration. The honest framing is:
 
 > I first built a controlled single-layer decode path and then added Qwen-style
