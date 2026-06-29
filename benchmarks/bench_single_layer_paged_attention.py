@@ -15,6 +15,7 @@ from turboinfer.kernels.paged_decode_attention import (
     triton_paged_decode_attention,
     triton_paged_decode_attention_gqa,
 )
+from turboinfer.kernels.rope import precompute_rope_angles
 from turboinfer.model_profiles import MODEL_PROFILES, get_model_profile
 from turboinfer.single_layer_attention import (
     contiguous_single_layer_decode_attention,
@@ -37,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-kv-heads", type=int, default=None, help="Number of key/value heads.")
     parser.add_argument("--head-dim", type=int, default=None)
     parser.add_argument("--block-size", type=int, default=None)
+    parser.add_argument("--use-rope", action="store_true", help="Apply split-half RoPE to Q/K before attention.")
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="float16")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
@@ -129,6 +131,11 @@ def main() -> None:
                 dtype=dtype,
             )
             decode_hidden = torch.randn(batch_size, hidden_size, device=device, dtype=dtype)
+            rope_angles = (
+                precompute_rope_angles(head_dim=head_dim, seq_len=context_len, device=device)
+                if args.use_rope
+                else None
+            )
 
             paged_inputs = make_single_layer_paged_inputs(
                 prompt_hidden=prompt_hidden,
@@ -140,6 +147,7 @@ def main() -> None:
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 block_size=block_size,
+                rope_angles=rope_angles,
             )
             contiguous_ref = contiguous_single_layer_decode_attention(
                 prompt_hidden,
@@ -150,6 +158,7 @@ def main() -> None:
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                rope_angles=rope_angles,
             )
             paged_ref = paged_attention_ref(
                 paged_inputs.q,
@@ -180,6 +189,7 @@ def main() -> None:
                     num_kv_heads=num_kv_heads,
                     head_dim=head_dim,
                     block_size=block_size,
+                    rope_angles=rope_angles,
                 ),
                 args.warmup,
                 args.iters,
@@ -237,6 +247,7 @@ def main() -> None:
                     "num_kv_heads": num_kv_heads,
                     "head_dim": head_dim,
                     "block_size": block_size,
+                    "use_rope": args.use_rope,
                     "dtype": args.dtype,
                     "max_abs_diff_paged_ref": max_abs_diff_paged_ref,
                     "max_abs_diff_triton": max_abs_diff_triton,
@@ -260,6 +271,7 @@ def main() -> None:
             {
                 "benchmark": "single_layer_paged_attention",
                 "profile": profile.to_dict(),
+                "use_rope": args.use_rope,
                 "device": torch.cuda.get_device_name(0),
                 "torch": torch.__version__,
                 "cuda": torch.version.cuda,

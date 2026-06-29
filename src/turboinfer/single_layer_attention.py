@@ -72,6 +72,7 @@ def contiguous_single_layer_decode_attention(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     v_bias: torch.Tensor | None = None,
+    rope_angles: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reference single-layer decode attention over contiguous projected K/V."""
 
@@ -82,6 +83,13 @@ def contiguous_single_layer_decode_attention(
     prompt_v = project_to_heads(prompt_hidden, v_weight, v_bias, num_kv_heads, head_dim)
     decode_k = project_to_heads(decode_hidden, k_weight, k_bias, num_kv_heads, head_dim)
     decode_v = project_to_heads(decode_hidden, v_weight, v_bias, num_kv_heads, head_dim)
+    if rope_angles is not None:
+        q, prompt_k, decode_k = apply_rope_to_single_layer_qk(
+            q=q,
+            prompt_k=prompt_k,
+            decode_k=decode_k,
+            rope_angles=rope_angles,
+        )
     keys = torch.cat([prompt_k, decode_k[:, None, :, :]], dim=1)
     values = torch.cat([prompt_v, decode_v[:, None, :, :]], dim=1)
     return contiguous_decode_attention(q, keys, values)
@@ -135,6 +143,7 @@ def make_single_layer_paged_inputs(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     v_bias: torch.Tensor | None = None,
+    rope_angles: torch.Tensor | None = None,
 ) -> SingleLayerPagedInputs:
     """Project Q/K/V, write K/V to paged storage, and export decode metadata."""
 
@@ -158,6 +167,13 @@ def make_single_layer_paged_inputs(
     prompt_v = project_to_heads(prompt_hidden, v_weight, v_bias, num_kv_heads, head_dim)
     decode_k = project_to_heads(decode_hidden, k_weight, k_bias, num_kv_heads, head_dim)
     decode_v = project_to_heads(decode_hidden, v_weight, v_bias, num_kv_heads, head_dim)
+    if rope_angles is not None:
+        q, prompt_k, decode_k = apply_rope_to_single_layer_qk(
+            q=q,
+            prompt_k=prompt_k,
+            decode_k=decode_k,
+            rope_angles=rope_angles,
+        )
 
     request_ids = list(range(batch_size))
     for request_id in request_ids:
@@ -197,6 +213,7 @@ def paged_single_layer_decode_attention(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     v_bias: torch.Tensor | None = None,
+    rope_angles: torch.Tensor | None = None,
     attention_impl: AttentionImpl | None = None,
 ) -> torch.Tensor:
     """Run projected single-layer decode attention through paged K/V storage."""
@@ -221,6 +238,7 @@ def paged_single_layer_decode_attention(
         q_bias=q_bias,
         k_bias=k_bias,
         v_bias=v_bias,
+        rope_angles=rope_angles,
     )
     return attention_impl(
         inputs.q,
@@ -229,6 +247,78 @@ def paged_single_layer_decode_attention(
         inputs.block_table,
         inputs.context_lens,
     )
+
+
+def apply_rope_to_single_layer_qk(
+    q: torch.Tensor,
+    prompt_k: torch.Tensor,
+    decode_k: torch.Tensor,
+    rope_angles: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Apply split-half RoPE to decode Q and prompt/decode K tensors.
+
+    Args:
+        q: `[batch, q_heads, head_dim]` at decode position `prompt_len`.
+        prompt_k: `[batch, prompt_len, kv_heads, head_dim]`.
+        decode_k: `[batch, kv_heads, head_dim]` at decode position `prompt_len`.
+        rope_angles: `[prompt_len + 1, head_dim // 2]`.
+    """
+
+    if q.ndim != 3:
+        raise ValueError(f"q must have shape [batch, q_heads, head_dim], got {tuple(q.shape)}")
+    if prompt_k.ndim != 4:
+        raise ValueError(
+            f"prompt_k must have shape [batch, prompt_len, kv_heads, head_dim], got {tuple(prompt_k.shape)}"
+        )
+    if decode_k.ndim != 3:
+        raise ValueError(f"decode_k must have shape [batch, kv_heads, head_dim], got {tuple(decode_k.shape)}")
+    batch_size, prompt_len, _, head_dim = prompt_k.shape
+    if q.shape[0] != batch_size or decode_k.shape[0] != batch_size:
+        raise ValueError("q, prompt_k, and decode_k batch sizes must match")
+    if q.shape[-1] != head_dim or decode_k.shape[-1] != head_dim:
+        raise ValueError("q, prompt_k, and decode_k head_dim values must match")
+    if head_dim % 2 != 0:
+        raise ValueError(f"head_dim must be even for RoPE, got {head_dim}")
+    expected_angles = (prompt_len + 1, head_dim // 2)
+    if tuple(rope_angles.shape) != expected_angles:
+        raise ValueError(f"rope_angles must have shape {expected_angles}, got {tuple(rope_angles.shape)}")
+
+    prompt_angles = rope_angles[:prompt_len]
+    decode_angles = rope_angles[prompt_len]
+    return (
+        _apply_split_half_rope(q, decode_angles),
+        _apply_split_half_rope(prompt_k, prompt_angles),
+        _apply_split_half_rope(decode_k, decode_angles),
+    )
+
+
+def _apply_split_half_rope(x: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
+    head_dim = int(x.shape[-1])
+    half_dim = head_dim // 2
+    x_float = x.float()
+    x1 = x_float[..., :half_dim]
+    x2 = x_float[..., half_dim:]
+    cos_values = torch.cos(angles).to(device=x.device)
+    sin_values = torch.sin(angles).to(device=x.device)
+    if x.ndim == 3 and angles.ndim == 1:
+        cos_values = cos_values[None, None, :]
+        sin_values = sin_values[None, None, :]
+    elif x.ndim == 4 and angles.ndim == 2:
+        cos_values = cos_values[None, :, None, :]
+        sin_values = sin_values[None, :, None, :]
+    else:
+        raise ValueError(
+            "unsupported RoPE broadcast shapes: "
+            f"x={tuple(x.shape)}, angles={tuple(angles.shape)}"
+        )
+    out = torch.cat(
+        [
+            x1 * cos_values - x2 * sin_values,
+            x1 * sin_values + x2 * cos_values,
+        ],
+        dim=-1,
+    )
+    return out.to(dtype=x.dtype)
 
 
 def _validate_hidden_inputs(prompt_hidden: torch.Tensor, decode_hidden: torch.Tensor) -> None:

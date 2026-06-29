@@ -6,7 +6,9 @@ except Exception as exc:  # pragma: no cover - depends on local torch installati
     pytest.skip(f"torch is unavailable: {exc}", allow_module_level=True)
 
 from turboinfer.kernels.paged_decode_attention import triton_paged_decode_attention
+from turboinfer.kernels.rope import precompute_rope_angles
 from turboinfer.single_layer_attention import (
+    apply_rope_to_single_layer_qk,
     contiguous_single_layer_decode_attention,
     make_single_layer_paged_inputs,
     paged_single_layer_decode_attention,
@@ -118,6 +120,107 @@ def test_paged_single_layer_gqa_attention_matches_contiguous_reference() -> None
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
         block_size=4,
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_apply_rope_to_single_layer_qk_preserves_shapes() -> None:
+    torch.manual_seed(0)
+    q = torch.randn(2, 4, 6)
+    prompt_k = torch.randn(2, 5, 2, 6)
+    decode_k = torch.randn(2, 2, 6)
+    rope_angles = precompute_rope_angles(head_dim=6, seq_len=6, device="cpu")
+
+    q_rope, prompt_k_rope, decode_k_rope = apply_rope_to_single_layer_qk(
+        q=q,
+        prompt_k=prompt_k,
+        decode_k=decode_k,
+        rope_angles=rope_angles,
+    )
+
+    assert q_rope.shape == q.shape
+    assert prompt_k_rope.shape == prompt_k.shape
+    assert decode_k_rope.shape == decode_k.shape
+
+
+def test_paged_single_layer_rope_attention_matches_contiguous_reference() -> None:
+    torch.manual_seed(0)
+    batch_size = 2
+    prompt_len = 5
+    hidden_size = 8
+    num_heads = 2
+    head_dim = 4
+    prompt_hidden = torch.randn(batch_size, prompt_len, hidden_size)
+    decode_hidden = torch.randn(batch_size, hidden_size)
+    q_weight, k_weight, v_weight = _make_weights(hidden_size, num_heads, head_dim)
+    rope_angles = precompute_rope_angles(head_dim=head_dim, seq_len=prompt_len + 1, device="cpu")
+
+    expected = contiguous_single_layer_decode_attention(
+        prompt_hidden,
+        decode_hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        rope_angles=rope_angles,
+    )
+    actual = paged_single_layer_decode_attention(
+        prompt_hidden,
+        decode_hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        block_size=4,
+        rope_angles=rope_angles,
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_paged_single_layer_gqa_rope_attention_matches_contiguous_reference() -> None:
+    torch.manual_seed(0)
+    batch_size = 2
+    prompt_len = 5
+    hidden_size = 8
+    num_q_heads = 4
+    num_kv_heads = 2
+    head_dim = 2
+    prompt_hidden = torch.randn(batch_size, prompt_len, hidden_size)
+    decode_hidden = torch.randn(batch_size, hidden_size)
+    q_weight, k_weight, v_weight = _make_gqa_weights(
+        hidden_size,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+    )
+    rope_angles = precompute_rope_angles(head_dim=head_dim, seq_len=prompt_len + 1, device="cpu")
+
+    expected = contiguous_single_layer_decode_attention(
+        prompt_hidden,
+        decode_hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        num_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        rope_angles=rope_angles,
+    )
+    actual = paged_single_layer_decode_attention(
+        prompt_hidden,
+        decode_hidden,
+        q_weight,
+        k_weight,
+        v_weight,
+        num_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        block_size=4,
+        rope_angles=rope_angles,
     )
 
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
