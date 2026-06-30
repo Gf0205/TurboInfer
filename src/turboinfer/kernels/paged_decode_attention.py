@@ -563,7 +563,7 @@ def triton_paged_decode_attention_gqa_grouped(
     num_kv_heads = k_cache.shape[1]
     block_size = k_cache.shape[2]
     group_size = num_q_heads // num_kv_heads
-    group_block_size = triton.next_power_of_2(group_size)
+    group_block_size = max(16, triton.next_power_of_2(group_size))
     output = torch.empty_like(q)
     grid = (batch_size, num_kv_heads)
     _paged_decode_attention_gqa_grouped_kernel[grid](
