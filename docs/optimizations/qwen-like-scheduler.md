@@ -42,6 +42,7 @@ python benchmarks/bench_qwen_like_scheduler.py \
   --prompt-token-length 512 \
   --max-new-tokens 64 \
   --max-batch-size 8 \
+  --prefill-batch-size 1 \
   --dtype float16 \
   --warmup-runs 1 \
   --runs 1
@@ -57,6 +58,23 @@ python benchmarks/bench_qwen_like_scheduler.py \
   --prompt-token-length 512 \
   --max-new-tokens 64 \
   --max-batch-size 8 \
+  --prefill-batch-size 1 \
+  --dtype float16 \
+  --warmup-runs 1 \
+  --runs 1
+```
+
+For batched prefill:
+
+```bash
+python benchmarks/bench_qwen_like_scheduler.py \
+  --profile qwen2.5-0.5b \
+  --num-requests 16 \
+  --arrival-interval-seconds 0.0 \
+  --prompt-token-length 512 \
+  --max-new-tokens 64 \
+  --max-batch-size 8 \
+  --prefill-batch-size 8 \
   --dtype float16 \
   --warmup-runs 1 \
   --runs 1
@@ -72,6 +90,7 @@ python benchmarks/bench_qwen_like_scheduler_matrix.py \
   --prompt-token-lengths 128 512 2048 \
   --max-new-tokens 64 \
   --max-batch-sizes 1 4 8 \
+  --prefill-batch-sizes 1 \
   --dtype float16 \
   --warmup-runs 1 \
   --runs 1
@@ -85,7 +104,8 @@ python benchmarks/bench_qwen_like_scheduler_matrix.py \
 - `request_throughput_per_second`: completed requests divided by total logical serving time.
 - `max_active_requests`: peak active decode set size.
 - `decode_steps`: number of scheduler decode ticks.
-- `prefill_steps`: number of request prefill operations.
+- `prefill_steps`: number of prefill operations. With batched prefill, this is
+  the number of prefill batches, not the number of requests.
 
 ## Current Limitations
 
@@ -96,7 +116,8 @@ python benchmarks/bench_qwen_like_scheduler_matrix.py \
   different positions. This is semantically correct for the scheduler v0, but it
   is not yet a fused ragged RoPE kernel.
 - Prefill is per request in this version; batched prefill is a future serving
-  optimization.
+- Batched prefill currently supports same-length prompt batches. Mixed prompt
+  lengths fall back to per-request prefill.
 
 ## Next Step
 

@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-token-length", type=int, default=512)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--max-batch-size", type=int, default=8)
+    parser.add_argument("--prefill-batch-size", type=int, default=1)
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="float16")
     parser.add_argument("--no-rope", action="store_true", help="Disable RoPE for an ablation run.")
     parser.add_argument("--warmup-runs", type=int, default=1)
@@ -90,6 +91,7 @@ def run_once(args: argparse.Namespace) -> dict[str, object]:
     scheduler = QwenLikePagedDecodeScheduler(
         layer=layer,
         max_batch_size=args.max_batch_size,
+        prefill_batch_size=args.prefill_batch_size,
         total_blocks=args.num_requests * blocks_per_request,
     )
     requests = make_requests(
@@ -118,6 +120,8 @@ def main() -> None:
         raise ValueError("--max-new-tokens must be positive")
     if args.max_batch_size <= 0:
         raise ValueError("--max-batch-size must be positive")
+    if args.prefill_batch_size <= 0:
+        raise ValueError("--prefill-batch-size must be positive")
     if args.arrival_interval_seconds < 0:
         raise ValueError("--arrival-interval-seconds must be non-negative")
 
@@ -142,6 +146,7 @@ def main() -> None:
                     "prompt_token_length": args.prompt_token_length,
                     "max_new_tokens": args.max_new_tokens,
                     "max_batch_size": args.max_batch_size,
+                    "prefill_batch_size": args.prefill_batch_size,
                 },
                 "warmup_runs": args.warmup_runs,
                 "runs": runs,

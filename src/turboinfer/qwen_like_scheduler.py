@@ -90,14 +90,18 @@ class QwenLikePagedDecodeScheduler:
         self,
         layer: QwenLikePagedAttention,
         max_batch_size: int = 8,
+        prefill_batch_size: int = 1,
         total_blocks: int = 8192,
         attention_impl: AttentionImpl | None = None,
     ) -> None:
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
+        if prefill_batch_size <= 0:
+            raise ValueError("prefill_batch_size must be positive")
         self.layer = layer
         self.profile = layer.profile
         self.max_batch_size = max_batch_size
+        self.prefill_batch_size = prefill_batch_size
         self.allocator = PagedKVAllocator(block_size=self.profile.block_size, total_blocks=total_blocks)
         self.buffer = PagedKVBuffer(
             allocator=self.allocator,
@@ -132,13 +136,15 @@ class QwenLikePagedDecodeScheduler:
                 continue
 
             while waiting and len(active) < self.max_batch_size:
-                spec = waiting.pop(0)
-                state = QwenLikeScheduledState(spec=spec)
-                now = max(now, spec.arrival_time)
-                elapsed = measure_step_seconds(lambda spec=spec: self.prefill(spec))
+                admit_count = min(self.max_batch_size - len(active), self.prefill_batch_size, len(waiting))
+                prefill_specs = waiting[:admit_count]
+                del waiting[:admit_count]
+                now = max(now, max(spec.arrival_time for spec in prefill_specs))
+                elapsed = measure_step_seconds(lambda specs=prefill_specs: self.prefill_batch(specs))
                 now += elapsed
-                state.prefill_done_time = now
-                active.append(state)
+                for spec in prefill_specs:
+                    state = QwenLikeScheduledState(spec=spec, prefill_done_time=now)
+                    active.append(state)
                 prefill_steps += 1
 
             if not active:
@@ -173,13 +179,72 @@ class QwenLikePagedDecodeScheduler:
         )
 
     def prefill(self, spec: QwenLikeScheduledRequest) -> None:
+        self.prefill_batch([spec])
+
+    def prefill_batch(self, specs: list[QwenLikeScheduledRequest]) -> None:
+        if not specs:
+            raise ValueError("specs must be non-empty")
+        if len(specs) == 1:
+            self._prefill_one(specs[0])
+            return
+        prompt_tokens = {spec.prompt_tokens for spec in specs}
+        if len(prompt_tokens) != 1:
+            for spec in specs:
+                self._prefill_one(spec)
+            return
+        max_new_tokens = {spec.max_new_tokens for spec in specs}
+        if len(max_new_tokens) != 1:
+            for spec in specs:
+                self._prefill_one(spec)
+            return
+
+        prompt_len = specs[0].prompt_tokens
+        for spec in specs:
+            self._allocate_request(spec)
+        prompt_batch = torch.stack(
+            [
+                spec.prompt_hidden.to(device=self.layer.device, dtype=self.layer.dtype)
+                for spec in specs
+            ],
+            dim=0,
+        )
+        self._validate_prompt_batch(prompt_batch)
+        prompt_k = project_to_heads(
+            prompt_batch,
+            self.layer.weights.k_proj,
+            self.layer.weights.k_bias,
+            self.profile.num_kv_heads,
+            self.profile.head_dim,
+        )
+        prompt_v = project_to_heads(
+            prompt_batch,
+            self.layer.weights.v_proj,
+            self.layer.weights.v_bias,
+            self.profile.num_kv_heads,
+            self.profile.head_dim,
+        )
+        if self.layer.use_rope:
+            rope_angles = precompute_rope_angles(
+                head_dim=self.profile.head_dim,
+                seq_len=prompt_len,
+                device=self.layer.device,
+            )
+            prompt_k = _apply_split_half_rope_for_qwen_like(prompt_k, rope_angles)
+        for batch_idx, spec in enumerate(specs):
+            self.buffer.write_tokens(
+                request_id=spec.request_id,
+                start_token_index=0,
+                keys=prompt_k[batch_idx],
+                values=prompt_v[batch_idx],
+            )
+
+    def _prefill_one(self, spec: QwenLikeScheduledRequest) -> None:
         prompt_hidden = spec.prompt_hidden.to(device=self.layer.device, dtype=self.layer.dtype)
         if prompt_hidden.ndim != 2:
             raise ValueError(f"prompt_hidden must have shape [seq, hidden], got {tuple(prompt_hidden.shape)}")
         if int(prompt_hidden.shape[1]) != self.profile.hidden_size:
             raise ValueError(f"expected hidden_size={self.profile.hidden_size}, got {prompt_hidden.shape[1]}")
-        total_tokens = spec.prompt_tokens + spec.max_new_tokens
-        self.allocator.allocate_request(spec.request_id, prompt_tokens=total_tokens)
+        self._allocate_request(spec)
 
         prompt_batch = prompt_hidden.unsqueeze(0)
         prompt_k = project_to_heads(
@@ -209,6 +274,16 @@ class QwenLikePagedDecodeScheduler:
             keys=prompt_k,
             values=prompt_v,
         )
+
+    def _allocate_request(self, spec: QwenLikeScheduledRequest) -> None:
+        total_tokens = spec.prompt_tokens + spec.max_new_tokens
+        self.allocator.allocate_request(spec.request_id, prompt_tokens=total_tokens)
+
+    def _validate_prompt_batch(self, prompt_batch: torch.Tensor) -> None:
+        if prompt_batch.ndim != 3:
+            raise ValueError(f"prompt batch must have shape [batch, seq, hidden], got {tuple(prompt_batch.shape)}")
+        if int(prompt_batch.shape[-1]) != self.profile.hidden_size:
+            raise ValueError(f"expected hidden_size={self.profile.hidden_size}, got {prompt_batch.shape[-1]}")
 
     def decode_batch(self, states: list[QwenLikeScheduledState]) -> torch.Tensor:
         if not states:

@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-token-lengths", type=int, nargs="+", default=[128, 512, 2048])
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--max-batch-sizes", type=int, nargs="+", default=[1, 4, 8])
+    parser.add_argument("--prefill-batch-sizes", type=int, nargs="+", default=[1])
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="float16")
     parser.add_argument("--no-rope", action="store_true", help="Disable RoPE for an ablation run.")
     parser.add_argument("--warmup-runs", type=int, default=1)
@@ -38,6 +39,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-new-tokens must be positive")
     if any(value <= 0 for value in args.max_batch_sizes):
         raise ValueError("--max-batch-sizes values must be positive")
+    if any(value <= 0 for value in args.prefill_batch_sizes):
+        raise ValueError("--prefill-batch-sizes values must be positive")
     if args.warmup_runs < 0:
         raise ValueError("--warmup-runs must be non-negative")
     if args.runs <= 0:
@@ -50,6 +53,7 @@ def make_case_args(
     arrival_interval_seconds: float,
     prompt_token_length: int,
     max_batch_size: int,
+    prefill_batch_size: int,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         profile=profile,
@@ -58,6 +62,7 @@ def make_case_args(
         prompt_token_length=prompt_token_length,
         max_new_tokens=args.max_new_tokens,
         max_batch_size=max_batch_size,
+        prefill_batch_size=prefill_batch_size,
         dtype=args.dtype,
         no_rope=args.no_rope,
     )
@@ -76,33 +81,37 @@ def main() -> None:
         * len(args.arrival_interval_seconds)
         * len(args.prompt_token_lengths)
         * len(args.max_batch_sizes)
+        * len(args.prefill_batch_sizes)
     )
 
     for profile_name in args.profiles:
         for arrival_interval_seconds in args.arrival_interval_seconds:
             for prompt_token_length in args.prompt_token_lengths:
                 for max_batch_size in args.max_batch_sizes:
-                    case_args = make_case_args(
-                        args,
-                        profile=profile_name,
-                        arrival_interval_seconds=arrival_interval_seconds,
-                        prompt_token_length=prompt_token_length,
-                        max_batch_size=max_batch_size,
-                    )
-                    for _ in range(args.warmup_runs):
-                        run_once(case_args)
-                    case_runs = [run_once(case_args) for _ in range(args.runs)]
-                    result = {
-                        "profile": profile_name,
-                        "num_requests": args.num_requests,
-                        "arrival_interval_seconds": arrival_interval_seconds,
-                        "prompt_token_length": prompt_token_length,
-                        "max_new_tokens": args.max_new_tokens,
-                        "max_batch_size": max_batch_size,
-                        "runs": case_runs,
-                    }
-                    results.append(result)
-                    print(f"completed {len(results)}/{total_cases} scheduler matrix cases", flush=True)
+                    for prefill_batch_size in args.prefill_batch_sizes:
+                        case_args = make_case_args(
+                            args,
+                            profile=profile_name,
+                            arrival_interval_seconds=arrival_interval_seconds,
+                            prompt_token_length=prompt_token_length,
+                            max_batch_size=max_batch_size,
+                            prefill_batch_size=prefill_batch_size,
+                        )
+                        for _ in range(args.warmup_runs):
+                            run_once(case_args)
+                        case_runs = [run_once(case_args) for _ in range(args.runs)]
+                        result = {
+                            "profile": profile_name,
+                            "num_requests": args.num_requests,
+                            "arrival_interval_seconds": arrival_interval_seconds,
+                            "prompt_token_length": prompt_token_length,
+                            "max_new_tokens": args.max_new_tokens,
+                            "max_batch_size": max_batch_size,
+                            "prefill_batch_size": prefill_batch_size,
+                            "runs": case_runs,
+                        }
+                        results.append(result)
+                        print(f"completed {len(results)}/{total_cases} scheduler matrix cases", flush=True)
 
     print(
         json.dumps(
@@ -122,6 +131,7 @@ def main() -> None:
                     "prompt_token_lengths": args.prompt_token_lengths,
                     "max_new_tokens": args.max_new_tokens,
                     "max_batch_sizes": args.max_batch_sizes,
+                    "prefill_batch_sizes": args.prefill_batch_sizes,
                 },
                 "results": results,
             },

@@ -63,6 +63,43 @@ def test_qwen_like_scheduler_completes_requests_and_frees_blocks() -> None:
     assert stats.total_freed_requests == 3
 
 
+def test_qwen_like_scheduler_batches_prefill_admission() -> None:
+    torch.manual_seed(0)
+    profile = _tiny_profile()
+    layer = QwenLikePagedAttention(
+        profile=profile,
+        dtype=torch.float32,
+        device="cpu",
+        use_rope=True,
+    )
+    scheduler = QwenLikePagedDecodeScheduler(
+        layer=layer,
+        max_batch_size=2,
+        prefill_batch_size=2,
+        total_blocks=16,
+    )
+    requests = [
+        QwenLikeScheduledRequest(
+            request_id=request_id,
+            arrival_time=0.0,
+            prompt_hidden=torch.randn(5, profile.hidden_size),
+            decode_hidden_steps=torch.randn(3, profile.hidden_size),
+        )
+        for request_id in range(3)
+    ]
+
+    metrics = scheduler.run(requests, measure_step_seconds=_measure)
+    stats = scheduler.allocator.stats()
+
+    assert metrics.num_requests == 3
+    assert metrics.total_output_tokens == 9
+    assert metrics.prefill_steps == 2
+    assert metrics.decode_steps == 6
+    assert stats.used_blocks == 0
+    assert stats.total_allocated_requests == 3
+    assert stats.total_freed_requests == 3
+
+
 def test_qwen_like_scheduler_respects_arrival_times() -> None:
     torch.manual_seed(0)
     profile = _tiny_profile()
