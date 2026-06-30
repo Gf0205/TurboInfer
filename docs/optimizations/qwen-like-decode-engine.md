@@ -47,6 +47,19 @@ python benchmarks/bench_qwen_like_decode_engine.py \
   --iters 50
 ```
 
+To compare multiple model-shaped profiles and workloads in one run:
+
+```bash
+python benchmarks/bench_qwen_like_decode_engine_matrix.py \
+  --profiles qwen2.5-0.5b qwen3-0.6b \
+  --num-requests 1 4 8 \
+  --prompt-token-lengths 128 512 2048 \
+  --max-new-tokens 64 \
+  --dtype float16 \
+  --warmup 10 \
+  --iters 50
+```
+
 The benchmark reports total decode-loop latency, mean decode-step latency, and
 token throughput. By default it also checks the first and last decode step
 against a contiguous reference.
