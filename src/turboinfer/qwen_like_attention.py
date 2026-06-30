@@ -443,6 +443,9 @@ def _apply_split_half_rope_with_cos_sin(
     if x.ndim == 3 and cos_values.ndim == 1:
         cos_values = cos_values[None, None, :]
         sin_values = sin_values[None, None, :]
+    elif x.ndim == 3 and cos_values.ndim == 2:
+        cos_values = cos_values[:, None, :]
+        sin_values = sin_values[:, None, :]
     elif x.ndim == 4 and cos_values.ndim == 2:
         cos_values = cos_values[None, :, None, :]
         sin_values = sin_values[None, :, None, :]
