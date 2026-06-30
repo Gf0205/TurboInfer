@@ -62,6 +62,21 @@ python benchmarks/bench_qwen_like_scheduler.py \
   --runs 1
 ```
 
+For a workload matrix:
+
+```bash
+python benchmarks/bench_qwen_like_scheduler_matrix.py \
+  --profiles qwen2.5-0.5b \
+  --num-requests 16 \
+  --arrival-interval-seconds 0.0 0.001 0.002 0.005 \
+  --prompt-token-lengths 128 512 2048 \
+  --max-new-tokens 64 \
+  --max-batch-sizes 1 4 8 \
+  --dtype float16 \
+  --warmup-runs 1 \
+  --runs 1
+```
+
 ## Metrics
 
 - `mean_ttft_seconds`: request arrival to first decoded token.
