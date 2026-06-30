@@ -13,7 +13,7 @@ reads more K/V tokens.
 
 - GPU: NVIDIA GeForce RTX 3090
 - Runtime: AutoDL
-- Torch/CUDA: fill from benchmark output
+- Torch/CUDA: PyTorch 2.1.2+cu121 / CUDA 12.1
 - Dtype: float16
 
 ## Smoke Command
@@ -42,7 +42,37 @@ python benchmarks/bench_grouped_gqa_attention.py \
 
 ## Results
 
-Paste the JSON output here after the AutoDL run.
+Initial grouped-kernel run before the `input_precision="ieee"` correction:
+
+| Batch | Context | Baseline ms | Grouped ms | Speedup | Baseline diff | Grouped diff |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 512 | 0.1021 | 0.0928 | 1.10x | 0.000015 | 0.2090 |
+| 1 | 2048 | 0.3995 | 0.3336 | 1.20x | 0.0000005 | 0.1760 |
+| 4 | 512 | 0.0890 | 0.0810 | 1.10x | 0.000031 | 0.3883 |
+| 4 | 2048 | 0.3475 | 0.3161 | 1.10x | 0.000004 | 0.1315 |
+| 8 | 512 | 0.1103 | 0.0803 | 1.37x | 0.000061 | 0.2778 |
+| 8 | 2048 | 0.4223 | 0.3298 | 1.28x | 0.000015 | 0.1688 |
+| 16 | 512 | 0.1475 | 0.0796 | 1.85x | 0.000031 | 0.3638 |
+| 16 | 2048 | 0.5641 | 0.3312 | 1.70x | 0.000015 | 0.1515 |
+
+## Interpretation
+
+The grouped kernel shows real latency potential, especially at larger batch
+sizes:
+
+- batch 8, context 2048: `1.28x` faster;
+- batch 16, context 2048: `1.70x` faster.
+
+However, the grouped output is not numerically acceptable yet. `max_abs_diff`
+is in the `0.13~0.38` range, while the baseline GQA Triton kernel stays around
+`1e-5`.
+
+Decision: do not wire grouped GQA into the scheduler yet.
+
+A small correction was added after this run: both grouped `tl.dot` calls now use
+`input_precision="ieee"`. Re-run the smoke benchmark to check whether the large
+diff is caused by default dot precision. If the diff remains large, keep grouped
+GQA as an experimental failed branch and return to the serving mainline.
 
 ## What To Check
 

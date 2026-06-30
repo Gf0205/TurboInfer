@@ -277,14 +277,14 @@ if triton is not None:
             k = tl.load(k_ptrs, mask=valid_slots[:, None], other=0.0).to(tl.float32)
             v = tl.load(v_ptrs, mask=valid_slots[:, None], other=0.0).to(tl.float32)
 
-            scores = tl.dot(q, tl.trans(k)) * scale
+            scores = tl.dot(q, tl.trans(k), input_precision="ieee") * scale
             scores = tl.where(q_head_mask[:, None] & valid_slots[None, :], scores, -float("inf"))
 
             m_new = tl.maximum(m_i, tl.max(scores, axis=1))
             alpha = tl.exp(m_i - m_new)
             p = tl.exp(scores - m_new[:, None])
             l_new = alpha * l_i + tl.sum(p, axis=1)
-            acc = alpha[:, None] * acc + tl.dot(p, v)
+            acc = alpha[:, None] * acc + tl.dot(p, v, input_precision="ieee")
 
             m_i = m_new
             l_i = l_new
