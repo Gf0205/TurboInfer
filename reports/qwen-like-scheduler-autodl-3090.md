@@ -12,7 +12,7 @@ batches.
 
 - GPU: NVIDIA GeForce RTX 3090
 - Runtime: AutoDL
-- Torch/CUDA: fill from benchmark output
+- Torch/CUDA: PyTorch 2.1.2+cu121 / CUDA 12.1
 - Dtype: float16
 
 ## Commands
@@ -64,7 +64,51 @@ python benchmarks/bench_qwen_like_scheduler.py \
 
 ## Results
 
-Paste the JSON outputs here after the AutoDL run.
+Workload:
+
+- Profile: Qwen2.5-0.5B-shaped
+- Requests: 16
+- Prompt tokens/request: 512
+- Output tokens/request: 64
+- Total output tokens: 1024
+
+| Case | Max batch | Arrival interval | Decode steps | Max active | Mean TTFT s | Mean TPOT s | Token throughput/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| all-at-once | 8 | 0.000 | 128 | 8 | 0.0522 | 0.00103 | 6547.55 |
+| batch-size ablation | 1 | 0.000 | 1024 | 1 | 0.4298 | 0.00087 | 1124.71 |
+| staggered arrivals | 8 | 0.002 | 133 | 8 | 0.0346 | 0.00111 | 6546.98 |
+
+Allocator cleanup:
+
+| Case | Peak live requests | Peak used blocks | End used token slots | Total freed requests | Allocation failures |
+|---|---:|---:|---:|---:|---:|
+| batch-size ablation | 1 | 36 | 0 | 16 | 0 |
+| staggered arrivals | 8 | 288 | 0 | 16 | 0 |
+
+The all-at-once run also ended with `used_token_slots=0`.
+
+## Interpretation
+
+The scheduler integration shows the expected serving behavior:
+
+1. Larger active batches reduce decode ticks. With `max_batch_size=1`, the run
+   needs `16 * 64 = 1024` decode steps. With `max_batch_size=8`, it needs `128`
+   steps for all-at-once arrivals.
+2. Larger active batches improve system throughput. The batch-8 all-at-once run
+   reaches `6547.55 tok/s`, while the batch-1 ablation reaches `1124.71 tok/s`.
+3. Batch-1 has slightly lower per-request TPOT (`0.00087s`) than batch-8
+   (`0.00103s`) because each individual step is cheaper. This is not a win: the
+   system emits only one token per step, so total throughput is much worse.
+4. Staggered arrivals keep similar token throughput (`6546.98 tok/s`) but reduce
+   mean TTFT to `0.0346s` because fewer requests wait behind the initial prefill
+   burst. It needs `133` decode steps instead of `128` because the active set is
+   not perfectly full for every tick.
+5. The allocator releases all request blocks at the end, which is the right
+   lifecycle behavior for the shared paged KV cache.
+
+The next bottleneck is no longer "does the scheduler work?" It does. The next
+question is whether to optimize scheduling behavior under more realistic arrival
+patterns or optimize the long-context GQA paged attention kernel.
 
 ## What To Check
 
