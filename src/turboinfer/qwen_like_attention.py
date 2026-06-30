@@ -52,6 +52,11 @@ class QwenLikePagedState:
     decode_offsets: torch.Tensor
     decode_cos: torch.Tensor | None
     decode_sin: torch.Tensor | None
+    decode_physical_blocks_by_slot: torch.Tensor
+    decode_offsets_by_slot: torch.Tensor
+    context_lens_by_slot: torch.Tensor
+    decode_cos_by_slot: torch.Tensor | None
+    decode_sin_by_slot: torch.Tensor | None
 
 
 class QwenLikePagedAttention:
@@ -152,14 +157,15 @@ class QwenLikePagedAttention:
     ) -> QwenLikePagedState:
         """Project and store prompt K/V once in paged storage.
 
-        `reserve_decode_tokens=1` allocates one extra slot so repeated benchmark
-        iterations can write a single decode token without rebuilding prompt K/V.
+        Extra decode slots are allocated up front. Each `decode_reserved()` call
+        writes one selected slot and passes a dynamic valid context length to the
+        attention kernel, so future reserved slots are not attended to early.
         """
 
         if prompt_hidden.ndim != 3:
             raise ValueError(f"prompt_hidden must have shape [batch, seq, hidden], got {tuple(prompt_hidden.shape)}")
-        if reserve_decode_tokens != 1:
-            raise ValueError("only reserve_decode_tokens=1 is supported for the current decode-step path")
+        if reserve_decode_tokens <= 0:
+            raise ValueError("reserve_decode_tokens must be positive")
         batch_size, prompt_len, hidden_size = prompt_hidden.shape
         if hidden_size != self.profile.hidden_size:
             raise ValueError(f"expected hidden_size={self.profile.hidden_size}, got {hidden_size}")
@@ -208,25 +214,45 @@ class QwenLikePagedAttention:
                 keys=prompt_k[request_id],
                 values=prompt_v[request_id],
             )
-        decode_cos = None
-        decode_sin = None
+        decode_cos_by_slot = None
+        decode_sin_by_slot = None
         if rope_angles is not None:
-            decode_angle = rope_angles[prompt_len]
-            decode_cos = torch.cos(decode_angle)
-            decode_sin = torch.sin(decode_angle)
+            decode_angles = rope_angles[prompt_len:total_context_len]
+            decode_cos_by_slot = torch.cos(decode_angles)
+            decode_sin_by_slot = torch.sin(decode_angles)
 
         metadata = allocator.decode_metadata(request_ids=request_ids)
         block_table, context_lens = metadata_to_tensors(metadata, device=prompt_hidden.device)
-        decode_slots = [allocator.token_slot(request_id, prompt_len) for request_id in request_ids]
-        decode_physical_blocks = torch.tensor(
-            [slot[0] for slot in decode_slots],
+        decode_physical_blocks_by_slot = torch.empty(
+            (reserve_decode_tokens, batch_size),
             device=prompt_hidden.device,
             dtype=torch.long,
         )
-        decode_offsets = torch.tensor(
-            [slot[1] for slot in decode_slots],
-            device=prompt_hidden.device,
-            dtype=torch.long,
+        decode_offsets_by_slot = torch.empty_like(decode_physical_blocks_by_slot)
+        for decode_slot in range(reserve_decode_tokens):
+            token_index = prompt_len + decode_slot
+            decode_slots = [allocator.token_slot(request_id, token_index) for request_id in request_ids]
+            decode_physical_blocks_by_slot[decode_slot] = torch.tensor(
+                [slot[0] for slot in decode_slots],
+                device=prompt_hidden.device,
+                dtype=torch.long,
+            )
+            decode_offsets_by_slot[decode_slot] = torch.tensor(
+                [slot[1] for slot in decode_slots],
+                device=prompt_hidden.device,
+                dtype=torch.long,
+            )
+        context_lens_by_slot = torch.stack(
+            [
+                torch.full(
+                    (batch_size,),
+                    fill_value=prompt_len + decode_slot + 1,
+                    device=prompt_hidden.device,
+                    dtype=context_lens.dtype,
+                )
+                for decode_slot in range(reserve_decode_tokens)
+            ],
+            dim=0,
         )
         return QwenLikePagedState(
             buffer=buffer,
@@ -235,10 +261,15 @@ class QwenLikePagedAttention:
             reserved_decode_tokens=reserve_decode_tokens,
             block_table=block_table,
             context_lens=context_lens,
-            decode_physical_blocks=decode_physical_blocks,
-            decode_offsets=decode_offsets,
-            decode_cos=decode_cos,
-            decode_sin=decode_sin,
+            decode_physical_blocks=decode_physical_blocks_by_slot[0],
+            decode_offsets=decode_offsets_by_slot[0],
+            decode_cos=decode_cos_by_slot[0] if decode_cos_by_slot is not None else None,
+            decode_sin=decode_sin_by_slot[0] if decode_sin_by_slot is not None else None,
+            decode_physical_blocks_by_slot=decode_physical_blocks_by_slot,
+            decode_offsets_by_slot=decode_offsets_by_slot,
+            context_lens_by_slot=context_lens_by_slot,
+            decode_cos_by_slot=decode_cos_by_slot,
+            decode_sin_by_slot=decode_sin_by_slot,
         )
 
     def decode_reserved(
@@ -262,6 +293,11 @@ class QwenLikePagedAttention:
             raise ValueError("decode_hidden batch size must match the prefilled state")
         if decode_slot < 0 or decode_slot >= state.reserved_decode_tokens:
             raise ValueError("decode_slot is outside reserved decode range")
+        decode_physical_blocks = state.decode_physical_blocks_by_slot[decode_slot]
+        decode_offsets = state.decode_offsets_by_slot[decode_slot]
+        context_lens = state.context_lens_by_slot[decode_slot]
+        decode_cos = state.decode_cos_by_slot[decode_slot] if state.decode_cos_by_slot is not None else None
+        decode_sin = state.decode_sin_by_slot[decode_slot] if state.decode_sin_by_slot is not None else None
 
         q = project_to_heads(
             decode_hidden,
@@ -284,12 +320,12 @@ class QwenLikePagedAttention:
             self.profile.num_kv_heads,
             self.profile.head_dim,
         )
-        if state.decode_cos is not None and state.decode_sin is not None:
-            q, decode_k = _apply_decode_rope_qk(q, decode_k, state.decode_cos, state.decode_sin)
+        if decode_cos is not None and decode_sin is not None:
+            q, decode_k = _apply_decode_rope_qk(q, decode_k, decode_cos, decode_sin)
 
         state.buffer.write_token_batch_at_slots(
-            physical_blocks=state.decode_physical_blocks,
-            offsets=state.decode_offsets,
+            physical_blocks=decode_physical_blocks,
+            offsets=decode_offsets,
             keys=decode_k,
             values=decode_v,
         )
@@ -298,7 +334,7 @@ class QwenLikePagedAttention:
             state.buffer.k_cache,
             state.buffer.v_cache,
             state.block_table,
-            state.context_lens,
+            context_lens,
         )
         return QwenLikeAttentionOutput(
             hidden_states=self._output_project(attention_heads),

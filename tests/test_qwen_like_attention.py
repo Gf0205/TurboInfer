@@ -81,6 +81,32 @@ def test_qwen_like_prefill_then_decode_matches_contiguous_reference() -> None:
     torch.testing.assert_close(actual.hidden_states, expected.hidden_states, rtol=1e-5, atol=1e-5)
 
 
+def test_qwen_like_prefill_then_multi_step_decode_matches_contiguous_reference() -> None:
+    torch.manual_seed(0)
+    profile = _tiny_profile()
+    layer = QwenLikePagedAttention(
+        profile=profile,
+        dtype=torch.float32,
+        device="cpu",
+        use_rope=True,
+    )
+    prompt_hidden = torch.randn(2, 5, profile.hidden_size)
+    decode_hidden_steps = torch.randn(3, 2, profile.hidden_size)
+
+    state = layer.prefill(prompt_hidden, reserve_decode_tokens=int(decode_hidden_steps.shape[0]))
+    decoded_prefixes = []
+    for decode_slot, decode_hidden in enumerate(decode_hidden_steps):
+        context_hidden = prompt_hidden
+        if decoded_prefixes:
+            context_hidden = torch.cat([prompt_hidden, torch.stack(decoded_prefixes, dim=1)], dim=1)
+        expected = layer.forward_contiguous(context_hidden, decode_hidden)
+        actual = layer.decode_reserved(state, decode_hidden, decode_slot=decode_slot)
+
+        torch.testing.assert_close(actual.attention_heads, expected.attention_heads, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(actual.hidden_states, expected.hidden_states, rtol=1e-5, atol=1e-5)
+        decoded_prefixes.append(decode_hidden)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton kernel")
 def test_qwen_like_attention_triton_path_matches_contiguous_reference() -> None:
     torch.manual_seed(0)
