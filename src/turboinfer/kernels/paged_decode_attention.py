@@ -197,9 +197,111 @@ if triton is not None:
         out = acc / l_i
         out_ptrs = output_ptr + batch_id * stride_ob + q_head_id * stride_oh + dim_offsets * stride_od
         tl.store(out_ptrs, out)
+
+    @triton.jit
+    def _paged_decode_attention_gqa_grouped_kernel(
+        output_ptr,
+        q_ptr,
+        k_cache_ptr,
+        v_cache_ptr,
+        block_table_ptr,
+        context_lens_ptr,
+        stride_qb: tl.constexpr,
+        stride_qh: tl.constexpr,
+        stride_qd: tl.constexpr,
+        stride_kblock: tl.constexpr,
+        stride_kh: tl.constexpr,
+        stride_ks: tl.constexpr,
+        stride_kd: tl.constexpr,
+        stride_vblock: tl.constexpr,
+        stride_vh: tl.constexpr,
+        stride_vs: tl.constexpr,
+        stride_vd: tl.constexpr,
+        stride_ob: tl.constexpr,
+        stride_oh: tl.constexpr,
+        stride_od: tl.constexpr,
+        stride_bt_b: tl.constexpr,
+        stride_bt_n: tl.constexpr,
+        HEAD_DIM: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+        GQA_GROUP_SIZE: tl.constexpr,
+        GROUP_BLOCK_SIZE: tl.constexpr,
+        NUM_Q_HEADS: tl.constexpr,
+    ):
+        batch_id = tl.program_id(0)
+        kv_head_id = tl.program_id(1)
+
+        context_len = tl.load(context_lens_ptr + batch_id)
+        group_offsets = tl.arange(0, GROUP_BLOCK_SIZE)
+        dim_offsets = tl.arange(0, HEAD_DIM)
+        slot_offsets = tl.arange(0, BLOCK_SIZE)
+        q_head_offsets = kv_head_id * GQA_GROUP_SIZE + group_offsets
+        q_head_mask = (group_offsets < GQA_GROUP_SIZE) & (q_head_offsets < NUM_Q_HEADS)
+
+        q_ptrs = (
+            q_ptr
+            + batch_id * stride_qb
+            + q_head_offsets[:, None] * stride_qh
+            + dim_offsets[None, :] * stride_qd
+        )
+        q = tl.load(q_ptrs, mask=q_head_mask[:, None], other=0.0).to(tl.float32)
+
+        m_i = tl.full([GROUP_BLOCK_SIZE], -float("inf"), dtype=tl.float32)
+        l_i = tl.zeros([GROUP_BLOCK_SIZE], dtype=tl.float32)
+        acc = tl.zeros([GROUP_BLOCK_SIZE, HEAD_DIM], dtype=tl.float32)
+        scale = HEAD_DIM ** -0.5
+
+        logical_block = 0
+        num_blocks = tl.cdiv(context_len, BLOCK_SIZE)
+        while logical_block < num_blocks:
+            physical_block = tl.load(
+                block_table_ptr + batch_id * stride_bt_b + logical_block * stride_bt_n
+            )
+            block_start = logical_block * BLOCK_SIZE
+            valid_slots = slot_offsets < (context_len - block_start)
+
+            k_ptrs = (
+                k_cache_ptr
+                + physical_block * stride_kblock
+                + kv_head_id * stride_kh
+                + slot_offsets[:, None] * stride_ks
+                + dim_offsets[None, :] * stride_kd
+            )
+            v_ptrs = (
+                v_cache_ptr
+                + physical_block * stride_vblock
+                + kv_head_id * stride_vh
+                + slot_offsets[:, None] * stride_vs
+                + dim_offsets[None, :] * stride_vd
+            )
+            k = tl.load(k_ptrs, mask=valid_slots[:, None], other=0.0).to(tl.float32)
+            v = tl.load(v_ptrs, mask=valid_slots[:, None], other=0.0).to(tl.float32)
+
+            scores = tl.dot(q, tl.trans(k)) * scale
+            scores = tl.where(q_head_mask[:, None] & valid_slots[None, :], scores, -float("inf"))
+
+            m_new = tl.maximum(m_i, tl.max(scores, axis=1))
+            alpha = tl.exp(m_i - m_new)
+            p = tl.exp(scores - m_new[:, None])
+            l_new = alpha * l_i + tl.sum(p, axis=1)
+            acc = alpha[:, None] * acc + tl.dot(p, v)
+
+            m_i = m_new
+            l_i = l_new
+            logical_block += 1
+
+        out = acc / l_i[:, None]
+        out_ptrs = (
+            output_ptr
+            + batch_id * stride_ob
+            + q_head_offsets[:, None] * stride_oh
+            + dim_offsets[None, :] * stride_od
+        )
+        tl.store(out_ptrs, out, mask=q_head_mask[:, None])
 else:
     _paged_decode_attention_kernel = None
     _paged_decode_attention_gqa_kernel = None
+    _paged_decode_attention_gqa_grouped_kernel = None
 
 
 def metadata_to_tensors(
@@ -427,6 +529,71 @@ def triton_paged_decode_attention_gqa(
         head_dim,
         block_size,
         group_size,
+        num_warps=4,
+    )
+    return output
+
+
+def triton_paged_decode_attention_gqa_grouped(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    context_lens: torch.Tensor,
+) -> torch.Tensor:
+    """Run a grouped Triton GQA paged decode attention kernel.
+
+    The baseline GQA Triton path launches one program per Q head, which reloads
+    the same K/V blocks for every Q head in a GQA group. This grouped variant
+    launches one program per KV head and computes all mapped Q heads together.
+    """
+
+    if _paged_decode_attention_gqa_grouped_kernel is None:
+        raise RuntimeError("triton_paged_decode_attention_gqa_grouped requires the triton package")
+    _validate_gqa_inputs(q, k_cache, v_cache, block_table, context_lens)
+    if not all(tensor.is_cuda for tensor in (q, k_cache, v_cache, block_table, context_lens)):
+        raise RuntimeError("triton_paged_decode_attention_gqa_grouped requires CUDA tensors")
+
+    q = q.contiguous()
+    k_cache = k_cache.contiguous()
+    v_cache = v_cache.contiguous()
+    block_table = block_table.contiguous()
+    context_lens = context_lens.contiguous()
+    batch_size, num_q_heads, head_dim = q.shape
+    num_kv_heads = k_cache.shape[1]
+    block_size = k_cache.shape[2]
+    group_size = num_q_heads // num_kv_heads
+    group_block_size = triton.next_power_of_2(group_size)
+    output = torch.empty_like(q)
+    grid = (batch_size, num_kv_heads)
+    _paged_decode_attention_gqa_grouped_kernel[grid](
+        output,
+        q,
+        k_cache,
+        v_cache,
+        block_table,
+        context_lens,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k_cache.stride(0),
+        k_cache.stride(1),
+        k_cache.stride(2),
+        k_cache.stride(3),
+        v_cache.stride(0),
+        v_cache.stride(1),
+        v_cache.stride(2),
+        v_cache.stride(3),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        block_table.stride(0),
+        block_table.stride(1),
+        head_dim,
+        block_size,
+        group_size,
+        group_block_size,
+        num_q_heads,
         num_warps=4,
     )
     return output

@@ -11,6 +11,7 @@ from turboinfer.kernels.paged_decode_attention import (
     pytorch_paged_decode_attention_gqa,
     triton_paged_decode_attention,
     triton_paged_decode_attention_gqa,
+    triton_paged_decode_attention_gqa_grouped,
 )
 from turboinfer.paged_allocator import PagedKVAllocator
 
@@ -131,6 +132,30 @@ def test_triton_paged_decode_attention_gqa_matches_reference() -> None:
 
     expected = pytorch_paged_decode_attention_gqa(q, k_cache, v_cache, block_table, context_lens)
     actual = triton_paged_decode_attention_gqa(q, k_cache, v_cache, block_table, context_lens)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=5e-2, atol=5e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton kernel")
+def test_triton_grouped_paged_decode_attention_gqa_matches_reference() -> None:
+    torch.manual_seed(0)
+    q = torch.randn(3, 14, 64, device="cuda", dtype=torch.float16)
+    k_cache = torch.randn(160, 2, 16, 64, device="cuda", dtype=torch.float16)
+    v_cache = torch.randn_like(k_cache)
+    block_table = torch.tensor(
+        [
+            list(range(0, 128)),
+            list(range(10, 138)),
+            list(range(20, 148)),
+        ],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    context_lens = torch.tensor([2048, 1536, 513], device="cuda", dtype=torch.int32)
+
+    expected = pytorch_paged_decode_attention_gqa(q, k_cache, v_cache, block_table, context_lens)
+    actual = triton_paged_decode_attention_gqa_grouped(q, k_cache, v_cache, block_table, context_lens)
     torch.cuda.synchronize()
 
     torch.testing.assert_close(actual.float(), expected.float(), rtol=5e-2, atol=5e-2)
